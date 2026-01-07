@@ -1,7 +1,10 @@
 /**
- * Zoopla Property Scraper - Production Ready
+ * Zoopla Property Scraper - Production Ready v2.3.0
  * Uses PlaywrightCrawler with Camoufox for Cloudflare bypass
- * Based on Apify's official Crawlee + Playwright + Camoufox template
+ * 
+ * CRITICAL FIX: 
+ * - useFingerprints: false to prevent conflict with Camoufox
+ * - Don't pass proxy to camoufoxLaunchOptions (let PlaywrightCrawler handle it)
  */
 
 import { PlaywrightCrawler } from '@crawlee/playwright';
@@ -210,13 +213,12 @@ const extractListingsFromHtml = (html) => {
             card = card.parent();
             if (!card.length) break;
 
-            // Check if this is a listing card
             const testId = card.attr('data-testid') || '';
             if (testId.includes('result') || testId.includes('listing') || card.is('article')) break;
             if (card.find('[data-testid="listing-price"]').length > 0) break;
         }
 
-        // Extract using data-testid selectors (most reliable)
+        // Extract using data-testid selectors
         const title = cleanText(
             card.find('[data-testid="listing-title"]').first().text() ||
             card.find('h2').first().text() ||
@@ -284,13 +286,11 @@ const extractListingsFromHtml = (html) => {
 const mergeListings = (jsonLdListings, htmlListings) => {
     const merged = new Map();
 
-    // Add JSON-LD listings first (primary)
     for (const listing of jsonLdListings) {
         const key = listing.listingId || listing.url;
         if (key) merged.set(key, { ...listing });
     }
 
-    // Merge HTML data (fills missing fields)
     for (const listing of htmlListings) {
         const key = listing.listingId || listing.url;
         if (!key) continue;
@@ -344,13 +344,15 @@ try {
 
     const resultsWanted = Math.max(1, Number.isFinite(+input.results_wanted) ? +input.results_wanted : 50);
     const maxPages = Math.max(1, Number.isFinite(+input.max_pages) ? +input.max_pages : 5);
-    const maxConcurrency = Math.min(2, input.maxConcurrency || 1);
+    // CRITICAL: Use only 1 concurrent browser to avoid detection
+    const maxConcurrency = 1;
 
     // Proxy configuration - UK residential proxies required
-    // checkAccess ensures credentials are valid
     const proxyConfiguration = await Actor.createProxyConfiguration({
+        useApifyProxy: true,
+        apifyProxyGroups: ['RESIDENTIAL'],
+        countryCode: 'GB',
         ...input.proxyConfiguration,
-        checkAccess: true,
     });
 
     log.info('Zoopla Scraper Starting', {
@@ -358,6 +360,7 @@ try {
         resultsWanted,
         maxPages,
         maxConcurrency,
+        usingCamoufox: true,
     });
 
     // State management
@@ -382,61 +385,67 @@ try {
         }
     }
 
+    // Get Camoufox launch options
+    // CRITICAL: Do NOT pass proxy here - let PlaywrightCrawler handle it
+    const camoufoxOptions = await camoufoxLaunchOptions({
+        headless: true,
+        // geoip: true will use the proxy to determine location
+        geoip: true,
+        // DO NOT pass proxy here - it causes NS_ERROR_PROXY_CONNECTION_REFUSED
+        // proxy: REMOVED - PlaywrightCrawler manages proxy via proxyConfiguration
+    });
+
+    log.info('Camoufox options configured', {
+        headless: true,
+        geoip: true,
+        proxyHandledBy: 'PlaywrightCrawler'
+    });
+
     // Create PlaywrightCrawler with Camoufox
-    // Following Apify's official template pattern
     const crawler = new PlaywrightCrawler({
+        // Proxy is handled here, NOT in camoufoxLaunchOptions
         proxyConfiguration,
         maxConcurrency,
-        maxRequestRetries: 3,
+        maxRequestRetries: 5,
         requestHandlerTimeoutSecs: 120,
-        navigationTimeoutSecs: 60,
+        navigationTimeoutSecs: 90,
 
-        // Camoufox launch configuration - exactly as in Apify template
+        // Camoufox launch configuration
         launchContext: {
             launcher: firefox,
-            launchOptions: await camoufoxLaunchOptions({
-                headless: true,
-                // Pass proxy URL for geoip matching
-                proxy: proxyConfiguration ? await proxyConfiguration.newUrl() : undefined,
-                // Enable GeoIP for location-based fingerprinting
-                geoip: true,
-                // Optional: Custom fonts for better fingerprint
-                // fonts: ['Arial', 'Times New Roman', 'Verdana'],
-            }),
+            launchOptions: camoufoxOptions,
         },
 
-        // Browser pool settings
+        // CRITICAL: Disable Crawlee's fingerprinting - Camoufox handles it
         browserPoolOptions: {
+            useFingerprints: false,  // <-- REQUIRED for Camoufox
             maxOpenPagesPerBrowser: 1,
-            retireBrowserAfterPageCount: 3,
+            retireBrowserAfterPageCount: 2,
         },
 
-        // Pre-navigation to add human-like behavior
+        // Pre-navigation for human-like behavior
         preNavigationHooks: [
             async ({ page }) => {
-                // Random delay before navigation
-                await sleep(1000 + Math.random() * 2000);
-
-                // Set UK locale and timezone
-                await page.emulateTimezone ? page.emulateTimezone('Europe/London') : null;
+                // Random delay before navigation (2-5 seconds)
+                const delay = 2000 + Math.random() * 3000;
+                log.debug(`Pre-navigation delay: ${Math.round(delay)}ms`);
+                await sleep(delay);
             },
         ],
 
-        // Post-navigation for waiting and scrolling
+        // Post-navigation for page interaction
         postNavigationHooks: [
             async ({ page }) => {
                 // Wait for page to stabilize
                 await page.waitForLoadState('domcontentloaded');
-                await sleep(1500 + Math.random() * 1000);
+                await sleep(2000 + Math.random() * 1000);
 
-                // Scroll to trigger lazy loading (human-like)
-                await page.evaluate(() => {
-                    window.scrollBy(0, 300);
-                });
+                // Human-like scrolling
+                await page.evaluate(() => window.scrollBy(0, 300));
                 await sleep(500);
-                await page.evaluate(() => {
-                    window.scrollBy(0, 500);
-                });
+                await page.evaluate(() => window.scrollBy(0, 500));
+                await sleep(1000);
+                await page.evaluate(() => window.scrollBy(0, 300));
                 await sleep(500);
             },
         ],
@@ -452,10 +461,21 @@ try {
 
             // Check for Cloudflare challenge
             const pageContent = await page.content();
-            if (pageContent.includes('Just a moment') || pageContent.includes('Verify you are human')) {
-                log.warning(`Cloudflare challenge on page ${pageNum}, waiting for resolution...`);
-                await sleep(5000);
+            if (pageContent.includes('Just a moment') ||
+                pageContent.includes('Verify you are human') ||
+                pageContent.includes('Checking your browser')) {
+                log.warning(`Cloudflare challenge detected on page ${pageNum}, waiting for resolution...`);
+
+                // Wait for challenge to resolve
+                await sleep(8000);
                 await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
+
+                // Check again after waiting
+                const newContent = await page.content();
+                if (newContent.includes('Just a moment') || newContent.includes('Verify you are human')) {
+                    log.error(`Cloudflare challenge not resolved on page ${pageNum}`);
+                    return;
+                }
             }
 
             if (type === 'search') {
@@ -474,7 +494,12 @@ try {
                 log.info(`Found ${listings.length} listings on page ${pageNum} (JSON-LD: ${jsonLdListings.length}, HTML: ${htmlListings.length})`);
 
                 if (!listings.length) {
-                    log.warning(`No listings found on page ${pageNum} - possible block`);
+                    log.warning(`No listings found on page ${pageNum} - may be blocked`);
+
+                    // Save debug info
+                    const title = await page.title();
+                    log.debug(`Page title: ${title}`);
+
                     return;
                 }
 
@@ -522,7 +547,10 @@ try {
 
         // Error handling
         async failedRequestHandler({ request, error }) {
-            log.error(`Request failed: ${request.url}`, { error: error.message });
+            log.error(`Request failed: ${request.url}`, {
+                error: error.message,
+                retryCount: request.retryCount
+            });
         },
     });
 
@@ -531,7 +559,7 @@ try {
 
     // Final status
     if (saved === 0) {
-        const message = 'No listings scraped. Ensure RESIDENTIAL proxies with countryCode: GB are configured.';
+        const message = 'No listings scraped. Zoopla may be blocking all requests. Try again later.';
         log.warning(message);
         await Actor.setStatusMessage(message);
     } else {
