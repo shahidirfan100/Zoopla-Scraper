@@ -9,6 +9,7 @@ const DEFAULT_MAX_CONCURRENCY = 3;
 const ENABLE_JSON_API = true;
 const ENABLE_HTML_FALLBACK = true;
 const ENABLE_SITEMAP_FALLBACK = true;
+const BLOCK_EVENTS = [];
 
 const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -19,15 +20,38 @@ const USER_AGENTS = [
 
 const DEFAULT_HEADERS = {
     Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Encoding': 'gzip, deflate, br',
     'Accept-Language': 'en-GB,en;q=0.9',
     'Cache-Control': 'no-cache',
     Pragma: 'no-cache',
+    Referer: BASE_URL,
     'Upgrade-Insecure-Requests': '1',
 };
 
 const JSON_HEADERS = {
     Accept: 'application/json, text/plain, */*',
+    'Accept-Encoding': 'gzip, deflate, br',
     'X-Requested-With': 'XMLHttpRequest',
+};
+
+const detectBlockReason = (response) => {
+    if (!response) return null;
+    const statusCode = response.statusCode;
+    if ([403, 429, 503].includes(statusCode)) return `HTTP_${statusCode}`;
+    const body = typeof response.body === 'string' ? response.body : '';
+    if (!body) return null;
+    if (/just a moment|verify you are human|captcha|enable javascript/i.test(body)) return 'challenge';
+    return null;
+};
+
+const recordBlockEvent = ({ url, statusCode, reason }) => {
+    if (BLOCK_EVENTS.length >= 50) return;
+    BLOCK_EVENTS.push({
+        url,
+        statusCode: statusCode ?? null,
+        reason,
+        timestamp: new Date().toISOString(),
+    });
 };
 
 const DETAIL_SELECTORS = {
@@ -139,13 +163,21 @@ const safeParseJson = (text) => {
     }
 };
 
-const requestPage = async ({ url, proxyConfiguration, responseType = 'text', headers = {}, timeoutMs = 30000 }) => {
+const requestPage = async ({
+    url,
+    proxyConfiguration,
+    responseType = 'text',
+    headers = {},
+    timeoutMs = 30000,
+    referer,
+}) => {
     const response = await gotScraping({
         url,
         responseType,
         headers: {
             ...DEFAULT_HEADERS,
             'User-Agent': getRandomUserAgent(),
+            ...(referer ? { Referer: referer } : {}),
             ...headers,
         },
         proxyUrl: proxyConfiguration ? await proxyConfiguration.newUrl() : undefined,
@@ -161,6 +193,12 @@ const requestPage = async ({ url, proxyConfiguration, responseType = 'text', hea
 
     if (response.statusCode === 429) {
         await sleep(2000 + Math.random() * 2000);
+    }
+
+    const blockReason = detectBlockReason(response);
+    if (blockReason) {
+        recordBlockEvent({ url, statusCode: response.statusCode, reason: blockReason });
+        log.warning(`Possible block (${blockReason}) for ${url}`);
     }
 
     return response;
@@ -586,9 +624,13 @@ const fetchListingsViaApi = async ({ startUrl, page, pageSize, proxyConfiguratio
             proxyConfiguration,
             headers: JSON_HEADERS,
             responseType: 'text',
+            referer: startUrl,
         });
 
-        if (response.statusCode !== 200 || !response.body) continue;
+        if (response.statusCode !== 200 || !response.body) {
+            log.debug(`API ${candidate.name} returned ${response.statusCode} for ${candidate.url}`);
+            continue;
+        }
         const payload = typeof response.body === 'string' ? safeParseJson(response.body) : response.body;
         if (!payload) continue;
 
@@ -602,14 +644,14 @@ const fetchListingsViaApi = async ({ startUrl, page, pageSize, proxyConfiguratio
 };
 
 const fetchListingsViaHtml = async ({ url, proxyConfiguration }) => {
-    const response = await requestPage({ url, proxyConfiguration, responseType: 'text' });
+    const response = await requestPage({ url, proxyConfiguration, responseType: 'text', referer: url });
     if (response.statusCode !== 200 || !response.body) return [];
     return extractListingsFromHtml(response.body);
 };
 
 const fetchListingDetail = async ({ url, proxyConfiguration }) => {
     if (!url) return null;
-    const response = await requestPage({ url, proxyConfiguration, responseType: 'text' });
+    const response = await requestPage({ url, proxyConfiguration, responseType: 'text', referer: BASE_URL });
     if (response.statusCode !== 200 || !response.body) return null;
     return parseDetailHtml(response.body);
 };
@@ -625,7 +667,7 @@ const fetchSitemapUrls = async ({ limit, proxyConfiguration }) => {
     const listingUrls = new Set();
 
     const collectFromSitemap = async (sitemapUrl) => {
-        const response = await requestPage({ url: sitemapUrl, proxyConfiguration, responseType: 'text' });
+        const response = await requestPage({ url: sitemapUrl, proxyConfiguration, responseType: 'text', referer: BASE_URL });
         if (response.statusCode !== 200 || !response.body) return;
 
         const $ = cheerioLoad(response.body, { xmlMode: true });
@@ -837,9 +879,14 @@ try {
         }
 
         if (saved === 0) {
-            const message = 'No listings were scraped. Review the logs for details.';
+            const message = BLOCK_EVENTS.length
+                ? 'No listings were scraped. Requests appear blocked; use residential proxies or rotate IPs.'
+                : 'No listings were scraped. Review the logs for details.';
             log.warning(message);
             await Actor.setStatusMessage(message);
+            if (BLOCK_EVENTS.length) {
+                await Actor.setValue('BLOCKED_REQUESTS', BLOCK_EVENTS);
+            }
         } else {
             log.info(`Saved ${saved} listings.`);
             await Actor.setValue('RUN_SUMMARY', {
