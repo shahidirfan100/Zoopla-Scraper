@@ -42,54 +42,10 @@
       "default": 3,
       "prefill": 3
     },
-    "pageSize": {
-      "title": "API page size",
-      "type": "integer",
-      "description": "Preferred page size for JSON API requests (when supported).",
-      "minimum": 5,
-      "maximum": 100,
-      "editor": "number",
-      "default": 25,
-      "prefill": 25
-    },
     "collectDetails": {
       "title": "Collect full property details",
       "type": "boolean",
       "description": "Visit each property detail page to extract descriptions, images, and structured data.",
-      "editor": "checkbox",
-      "default": true,
-      "prefill": true
-    },
-    "maxConcurrency": {
-      "title": "Max concurrency",
-      "type": "integer",
-      "description": "Maximum concurrent requests (2-5 recommended).",
-      "minimum": 1,
-      "maximum": 10,
-      "default": 3,
-      "prefill": 3,
-      "editor": "number"
-    },
-    "useJsonApi": {
-      "title": "Use JSON API first",
-      "type": "boolean",
-      "description": "Attempt JSON API endpoints before HTML scraping.",
-      "editor": "checkbox",
-      "default": true,
-      "prefill": true
-    },
-    "useHtmlFallback": {
-      "title": "Use HTML fallback",
-      "type": "boolean",
-      "description": "Fallback to HTML parsing when API results are not available.",
-      "editor": "checkbox",
-      "default": true,
-      "prefill": true
-    },
-    "useSitemap": {
-      "title": "Use sitemap fallback",
-      "type": "boolean",
-      "description": "Try sitemap discovery if API and HTML results are insufficient.",
       "editor": "checkbox",
       "default": true,
       "prefill": true

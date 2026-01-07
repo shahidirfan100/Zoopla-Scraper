@@ -4,6 +4,11 @@ import { load as cheerioLoad } from 'cheerio';
 
 const BASE_URL = 'https://www.zoopla.co.uk';
 const DEFAULT_START_URL = 'https://www.zoopla.co.uk/for-sale/property/london/?q=London&search_source=home&recent_search=true';
+const DEFAULT_PAGE_SIZE = 25;
+const DEFAULT_MAX_CONCURRENCY = 3;
+const ENABLE_JSON_API = true;
+const ENABLE_HTML_FALLBACK = true;
+const ENABLE_SITEMAP_FALLBACK = true;
 
 const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -664,183 +669,185 @@ try {
     const startUrls = Array.isArray(input.startUrls) && input.startUrls.length ? input.startUrls : null;
     const startUrl = input.startUrl || (startUrls ? null : DEFAULT_START_URL);
 
-    if (!startUrl && !startUrls) {
+    const hasInputError = !startUrl && !startUrls;
+    if (hasInputError) {
         const message = 'Missing required field: startUrl or startUrls.';
         log.error(message);
         await Actor.setStatusMessage(message);
         await Actor.setValue('INPUT_VALIDATION_ERROR', { message, timestamp: new Date().toISOString() });
-        return;
     }
 
-    const resultsWanted = Math.max(1, Number.isFinite(+input.results_wanted) ? +input.results_wanted : 50);
-    const maxPages = Math.max(1, Number.isFinite(+input.max_pages) ? +input.max_pages : 3);
-    const pageSize = Math.max(5, Number.isFinite(+input.pageSize) ? +input.pageSize : 25);
-    const collectDetails = input.collectDetails !== false;
-    const maxConcurrency = Math.max(1, Math.min(10, Number.isFinite(+input.maxConcurrency) ? +input.maxConcurrency : 3));
-    const useJsonApi = input.useJsonApi !== false;
-    const useHtmlFallback = input.useHtmlFallback !== false;
-    const useSitemap = input.useSitemap !== false;
+    if (!hasInputError) {
+        const resultsWanted = Math.max(1, Number.isFinite(+input.results_wanted) ? +input.results_wanted : 50);
+        const maxPages = Math.max(1, Number.isFinite(+input.max_pages) ? +input.max_pages : 3);
+        const pageSize = DEFAULT_PAGE_SIZE;
+        const collectDetails = input.collectDetails !== false;
+        const maxConcurrency = DEFAULT_MAX_CONCURRENCY;
+        const useJsonApi = ENABLE_JSON_API;
+        const useHtmlFallback = ENABLE_HTML_FALLBACK;
+        const useSitemap = ENABLE_SITEMAP_FALLBACK;
 
-    const proxyConf = input.proxyConfiguration
-        ? await Actor.createProxyConfiguration({ ...input.proxyConfiguration })
-        : undefined;
+        const proxyConf = input.proxyConfiguration
+            ? await Actor.createProxyConfiguration({ ...input.proxyConfiguration })
+            : undefined;
 
-    const targets = startUrls || [startUrl];
+        const targets = startUrls || [startUrl];
 
-    const seen = new Set();
-    const limiter = createLimiter(maxConcurrency);
-    const errorLog = [];
-    const stats = { pagesProcessed: 0, listingsSaved: 0, methodsUsed: [] };
+        const seen = new Set();
+        const limiter = createLimiter(maxConcurrency);
+        const errorLog = [];
+        const stats = { pagesProcessed: 0, listingsSaved: 0, methodsUsed: [] };
 
-    let saved = 0;
+        let saved = 0;
 
-    for (const target of targets) {
-        if (saved >= resultsWanted) break;
-        log.info(`Starting search: ${target}`);
+        for (const target of targets) {
+            if (saved >= resultsWanted) break;
+            log.info(`Starting search: ${target}`);
 
-        if (useJsonApi) {
-            for (let page = 1; page <= maxPages && saved < resultsWanted; page += 1) {
+            if (useJsonApi) {
+                for (let page = 1; page <= maxPages && saved < resultsWanted; page += 1) {
+                    try {
+                        const apiResult = await fetchListingsViaApi({
+                            startUrl: target,
+                            page,
+                            pageSize,
+                            proxyConfiguration: proxyConf,
+                        });
+
+                        if (!apiResult.listings.length) {
+                            break;
+                        }
+
+                        if (!stats.methodsUsed.includes('json-api')) stats.methodsUsed.push('json-api');
+
+                        const tasks = apiResult.listings.map((listing) =>
+                            limiter(async () => {
+                                if (saved >= resultsWanted) return;
+                                const key = listing.listingId || listing.url;
+                                if (!key || seen.has(key)) return;
+                                seen.add(key);
+
+                                let detail = null;
+                                if (collectDetails && listing.url) {
+                                    detail = await fetchListingDetail({ url: listing.url, proxyConfiguration: proxyConf });
+                                }
+
+                                const property = buildProperty({ listing, detail, source: 'json-api' });
+                                await Dataset.pushData(property);
+                                saved += 1;
+                                stats.listingsSaved = saved;
+                            })
+                        );
+
+                        await Promise.all(tasks);
+                        stats.pagesProcessed += 1;
+                    } catch (err) {
+                        errorLog.push({
+                            timestamp: new Date().toISOString(),
+                            method: 'json-api',
+                            page,
+                            error: err.message,
+                        });
+                        break;
+                    }
+                }
+            }
+
+            if (saved < resultsWanted && useHtmlFallback) {
+                for (let page = 1; page <= maxPages && saved < resultsWanted; page += 1) {
+                    const pageUrl = buildSearchUrlForPage(target, page);
+                    try {
+                        const listings = await fetchListingsViaHtml({ url: pageUrl, proxyConfiguration: proxyConf });
+                        if (!listings.length) break;
+
+                        if (!stats.methodsUsed.includes('html')) stats.methodsUsed.push('html');
+
+                        const tasks = listings.map((listing) =>
+                            limiter(async () => {
+                                if (saved >= resultsWanted) return;
+                                const key = listing.listingId || listing.url;
+                                if (!key || seen.has(key)) return;
+                                seen.add(key);
+
+                                let detail = null;
+                                if (collectDetails && listing.url) {
+                                    detail = await fetchListingDetail({ url: listing.url, proxyConfiguration: proxyConf });
+                                }
+
+                                const property = buildProperty({ listing, detail, source: 'html' });
+                                await Dataset.pushData(property);
+                                saved += 1;
+                                stats.listingsSaved = saved;
+                            })
+                        );
+
+                        await Promise.all(tasks);
+                        stats.pagesProcessed += 1;
+                    } catch (err) {
+                        errorLog.push({
+                            timestamp: new Date().toISOString(),
+                            method: 'html',
+                            page,
+                            error: err.message,
+                        });
+                        break;
+                    }
+                }
+            }
+
+            if (saved < resultsWanted && useSitemap) {
                 try {
-                    const apiResult = await fetchListingsViaApi({
-                        startUrl: target,
-                        page,
-                        pageSize,
+                    const sitemapUrls = await fetchSitemapUrls({
+                        limit: resultsWanted - saved,
                         proxyConfiguration: proxyConf,
                     });
 
-                    if (!apiResult.listings.length) {
-                        break;
+                    if (sitemapUrls.length) {
+                        if (!stats.methodsUsed.includes('sitemap')) stats.methodsUsed.push('sitemap');
+
+                        const tasks = sitemapUrls.map((url) =>
+                            limiter(async () => {
+                                if (saved >= resultsWanted) return;
+                                const key = extractListingId(url) || url;
+                                if (seen.has(key)) return;
+                                seen.add(key);
+
+                                const detail = await fetchListingDetail({ url, proxyConfiguration: proxyConf });
+                                const property = buildProperty({ listing: { url }, detail, source: 'sitemap' });
+                                await Dataset.pushData(property);
+                                saved += 1;
+                                stats.listingsSaved = saved;
+                            })
+                        );
+
+                        await Promise.all(tasks);
                     }
-
-                    if (!stats.methodsUsed.includes('json-api')) stats.methodsUsed.push('json-api');
-
-                    const tasks = apiResult.listings.map((listing) =>
-                        limiter(async () => {
-                            if (saved >= resultsWanted) return;
-                            const key = listing.listingId || listing.url;
-                            if (!key || seen.has(key)) return;
-                            seen.add(key);
-
-                            let detail = null;
-                            if (collectDetails && listing.url) {
-                                detail = await fetchListingDetail({ url: listing.url, proxyConfiguration: proxyConf });
-                            }
-
-                            const property = buildProperty({ listing, detail, source: 'json-api' });
-                            await Dataset.pushData(property);
-                            saved += 1;
-                            stats.listingsSaved = saved;
-                        })
-                    );
-
-                    await Promise.all(tasks);
-                    stats.pagesProcessed += 1;
                 } catch (err) {
                     errorLog.push({
                         timestamp: new Date().toISOString(),
-                        method: 'json-api',
-                        page,
+                        method: 'sitemap',
                         error: err.message,
                     });
-                    break;
                 }
             }
         }
 
-        if (saved < resultsWanted && useHtmlFallback) {
-            for (let page = 1; page <= maxPages && saved < resultsWanted; page += 1) {
-                const pageUrl = buildSearchUrlForPage(target, page);
-                try {
-                    const listings = await fetchListingsViaHtml({ url: pageUrl, proxyConfiguration: proxyConf });
-                    if (!listings.length) break;
-
-                    if (!stats.methodsUsed.includes('html')) stats.methodsUsed.push('html');
-
-                    const tasks = listings.map((listing) =>
-                        limiter(async () => {
-                            if (saved >= resultsWanted) return;
-                            const key = listing.listingId || listing.url;
-                            if (!key || seen.has(key)) return;
-                            seen.add(key);
-
-                            let detail = null;
-                            if (collectDetails && listing.url) {
-                                detail = await fetchListingDetail({ url: listing.url, proxyConfiguration: proxyConf });
-                            }
-
-                            const property = buildProperty({ listing, detail, source: 'html' });
-                            await Dataset.pushData(property);
-                            saved += 1;
-                            stats.listingsSaved = saved;
-                        })
-                    );
-
-                    await Promise.all(tasks);
-                    stats.pagesProcessed += 1;
-                } catch (err) {
-                    errorLog.push({
-                        timestamp: new Date().toISOString(),
-                        method: 'html',
-                        page,
-                        error: err.message,
-                    });
-                    break;
-                }
-            }
+        if (errorLog.length) {
+            await Actor.setValue('ERROR_LOG', errorLog);
         }
 
-        if (saved < resultsWanted && useSitemap) {
-            try {
-                const sitemapUrls = await fetchSitemapUrls({
-                    limit: resultsWanted - saved,
-                    proxyConfiguration: proxyConf,
-                });
-
-                if (sitemapUrls.length) {
-                    if (!stats.methodsUsed.includes('sitemap')) stats.methodsUsed.push('sitemap');
-
-                    const tasks = sitemapUrls.map((url) =>
-                        limiter(async () => {
-                            if (saved >= resultsWanted) return;
-                            const key = extractListingId(url) || url;
-                            if (seen.has(key)) return;
-                            seen.add(key);
-
-                            const detail = await fetchListingDetail({ url, proxyConfiguration: proxyConf });
-                            const property = buildProperty({ listing: { url }, detail, source: 'sitemap' });
-                            await Dataset.pushData(property);
-                            saved += 1;
-                            stats.listingsSaved = saved;
-                        })
-                    );
-
-                    await Promise.all(tasks);
-                }
-            } catch (err) {
-                errorLog.push({
-                    timestamp: new Date().toISOString(),
-                    method: 'sitemap',
-                    error: err.message,
-                });
-            }
+        if (saved === 0) {
+            const message = 'No listings were scraped. Review the logs for details.';
+            log.warning(message);
+            await Actor.setStatusMessage(message);
+        } else {
+            log.info(`Saved ${saved} listings.`);
+            await Actor.setValue('RUN_SUMMARY', {
+                listingsSaved: saved,
+                pagesProcessed: stats.pagesProcessed,
+                methodsUsed: stats.methodsUsed,
+            });
         }
-    }
-
-    if (errorLog.length) {
-        await Actor.setValue('ERROR_LOG', errorLog);
-    }
-
-    if (saved === 0) {
-        const message = 'No listings were scraped. Review the logs for details.';
-        log.warning(message);
-        await Actor.setStatusMessage(message);
-    } else {
-        log.info(`Saved ${saved} listings.`);
-        await Actor.setValue('RUN_SUMMARY', {
-            listingsSaved: saved,
-            pagesProcessed: stats.pagesProcessed,
-            methodsUsed: stats.methodsUsed,
-        });
     }
 } catch (error) {
     log.error(`Actor failed: ${error.message}`);

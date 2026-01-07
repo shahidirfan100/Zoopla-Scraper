@@ -28,6 +28,8 @@ Extract UK property listings, pricing, and detail data from Zoopla. This actor p
 3. JSON-LD extraction on detail pages (structured data)
 4. Sitemap discovery (optional fallback)
 
+Concurrency, API page size, and fallback order are fixed internally for stability.
+
 ## Quick start
 
 Basic input:
@@ -50,12 +52,7 @@ High coverage input:
   ],
   "results_wanted": 200,
   "max_pages": 5,
-  "pageSize": 25,
   "collectDetails": true,
-  "maxConcurrency": 3,
-  "useJsonApi": true,
-  "useHtmlFallback": true,
-  "useSitemap": true,
   "proxyConfiguration": {
     "useApifyProxy": true,
     "apifyProxyGroups": ["RESIDENTIAL"]
@@ -100,40 +97,10 @@ High coverage input:
 <td>Maximum search pages to process per URL.</td>
 </tr>
 <tr>
-<td><code>pageSize</code></td>
-<td>integer</td>
-<td>25</td>
-<td>Preferred JSON API page size (if supported).</td>
-</tr>
-<tr>
 <td><code>collectDetails</code></td>
 <td>boolean</td>
 <td>true</td>
 <td>Visit listing detail pages for full data.</td>
-</tr>
-<tr>
-<td><code>maxConcurrency</code></td>
-<td>integer</td>
-<td>3</td>
-<td>Maximum concurrent requests.</td>
-</tr>
-<tr>
-<td><code>useJsonApi</code></td>
-<td>boolean</td>
-<td>true</td>
-<td>Try JSON endpoints before HTML parsing.</td>
-</tr>
-<tr>
-<td><code>useHtmlFallback</code></td>
-<td>boolean</td>
-<td>true</td>
-<td>Fallback to HTML parsing when needed.</td>
-</tr>
-<tr>
-<td><code>useSitemap</code></td>
-<td>boolean</td>
-<td>true</td>
-<td>Try sitemap discovery for extra coverage.</td>
 </tr>
 <tr>
 <td><code>proxyConfiguration</code></td>
