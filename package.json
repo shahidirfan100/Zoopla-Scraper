@@ -1,14 +1,11 @@
 {
   "name": "zoopla-property-scraper",
-  "version": "1.0.0",
-  "description": "Zoopla property scraper - Extract listings, prices, and property details from Zoopla",
+  "version": "2.0.0",
+  "description": "Fast, stealthy Zoopla property scraper using JSON-LD extraction with Apify best practices",
   "type": "module",
   "dependencies": {
-    "apify": "^3.5.2",
+    "apify": "^3.5.3",
     "crawlee": "^3.15.3",
-    "camoufox-js": "^0.7.0",
-    "got-scraping": "^4.1.2",
-    "playwright": "1.56.1",
     "cheerio": "^1.0.0-rc.12"
   },
   "devDependencies": {
@@ -26,5 +23,8 @@
     "test": "echo \"Error: oops, the Actor has no tests yet, sad!\" && exit 1"
   },
   "author": "Shahid",
-  "license": "ISC"
+  "license": "ISC",
+  "engines": {
+    "node": ">=18.0.0"
+  }
 }

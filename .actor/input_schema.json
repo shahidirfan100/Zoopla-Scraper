@@ -1,20 +1,24 @@
 {
   "title": "Zoopla Property Scraper",
-  "description": "JSON-first Zoopla scraper with HTML and sitemap fallbacks. Supports pagination, detail extraction, and proxy configuration.",
+  "description": "Fast, stealthy Zoopla scraper using JSON-LD extraction. Extracts property listings with prices, addresses, and details from Zoopla UK.",
   "type": "object",
   "schemaVersion": 1,
   "properties": {
+    "startUrl": {
+      "title": "Search URL",
+      "type": "string",
+      "description": "Zoopla search URL to scrape. Example: https://www.zoopla.co.uk/for-sale/property/london/",
+      "editor": "textfield",
+      "prefill": "https://www.zoopla.co.uk/for-sale/property/london/?q=London&search_source=home&recent_search=true"
+    },
     "startUrls": {
       "title": "Multiple search URLs",
       "type": "array",
-      "description": "Optional list of Zoopla search URLs to crawl.",
-      "editor": "stringList",
-      "example": [
-        "https://www.zoopla.co.uk/for-sale/property/london/?q=London&search_source=home&recent_search=true"
-      ]
+      "description": "Optional list of multiple Zoopla search URLs to crawl.",
+      "editor": "stringList"
     },
     "results_wanted": {
-      "title": "Maximum listings to extract",
+      "title": "Maximum listings",
       "type": "integer",
       "description": "Maximum number of property listings to collect (1-1000).",
       "minimum": 1,
@@ -28,35 +32,37 @@
       "type": "integer",
       "description": "Maximum number of search pages to process per URL.",
       "minimum": 1,
-      "maximum": 20,
+      "maximum": 50,
       "editor": "number",
-      "default": 3,
-      "prefill": 3
+      "default": 10,
+      "prefill": 10
     },
     "collectDetails": {
       "title": "Collect full property details",
       "type": "boolean",
-      "description": "Visit each property detail page to extract descriptions, images, and structured data.",
+      "description": "Visit each property detail page to extract descriptions, images, and structured data. Slower but more complete.",
       "editor": "checkbox",
-      "default": true,
-      "prefill": true
+      "default": false,
+      "prefill": false
     },
     "proxyConfiguration": {
       "title": "Proxy configuration",
       "type": "object",
-      "description": "Recommended: use Apify Proxy for reliability.",
+      "description": "Recommended: Use Apify residential proxies with UK country code for best results.",
       "editor": "proxy",
       "default": {
         "useApifyProxy": true,
         "apifyProxyGroups": [
           "RESIDENTIAL"
-        ]
+        ],
+        "countryCode": "GB"
       },
       "prefill": {
         "useApifyProxy": true,
         "apifyProxyGroups": [
           "RESIDENTIAL"
-        ]
+        ],
+        "countryCode": "GB"
       }
     }
   }

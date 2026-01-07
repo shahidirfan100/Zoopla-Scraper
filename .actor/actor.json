@@ -1,7 +1,7 @@
 {
   "actorSpecification": 1,
   "name": "zoopla-property-scraper",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "buildTag": "latest",
   "dockerfile": "./Dockerfile",
   "readme": "./README.md",

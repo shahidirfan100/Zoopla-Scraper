@@ -1,10 +1,9 @@
-# Specify the base Docker image. You can read more about
-# the available images at https://crawlee.dev/docs/guides/docker-images
-# You can also use any other image from Docker Hub.
-FROM apify/actor-node-playwright-camoufox:22-1.56.1
+# Use lightweight Node.js image for CheerioCrawler (no browser needed)
+# This makes the actor faster to build and deploy
+FROM apify/actor-node:22
 
 # Check preinstalled packages
-RUN npm ls @crawlee/core apify playwright || true
+RUN npm ls @crawlee/core apify || true
 
 # Copy just package.json and package-lock.json
 # to speed up the build using Docker layer cache.
