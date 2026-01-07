@@ -1,6 +1,8 @@
 import { Actor, Dataset, log } from 'apify';
 import { gotScraping } from 'crawlee';
 import { load as cheerioLoad } from 'cheerio';
+import { launchOptions as camoufoxLaunchOptions } from 'camoufox-js';
+import { firefox } from 'playwright';
 
 const BASE_URL = 'https://www.zoopla.co.uk';
 const DEFAULT_START_URL = 'https://www.zoopla.co.uk/for-sale/property/london/?q=London&search_source=home&recent_search=true';
@@ -10,6 +12,9 @@ const ENABLE_JSON_API = true;
 const ENABLE_HTML_FALLBACK = true;
 const ENABLE_SITEMAP_FALLBACK = true;
 const BLOCK_EVENTS = [];
+const BROWSER_TIMEOUT_MS = 45000;
+const BROWSER_WAIT_UNTIL = 'networkidle';
+let browserPromise = null;
 
 const USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -154,6 +159,69 @@ const createLimiter = (maxConcurrency) => {
             next();
         });
 };
+
+const browserLimiter = createLimiter(1);
+
+const getBrowser = async (proxyConfiguration) => {
+    if (!browserPromise) {
+        const launchOptions = await camoufoxLaunchOptions({
+            headless: true,
+            geoip: true,
+            proxy: proxyConfiguration ? await proxyConfiguration.newUrl() : undefined,
+        });
+        browserPromise = firefox.launch(launchOptions);
+    }
+    return browserPromise;
+};
+
+const closeBrowser = async () => {
+    if (!browserPromise) return;
+    const browser = await browserPromise;
+    await browser.close().catch(() => {});
+    browserPromise = null;
+};
+
+const fetchViaBrowser = async ({ url, proxyConfiguration }) =>
+    browserLimiter(async () => {
+        const browser = await getBrowser(proxyConfiguration);
+        const context = await browser.newContext({
+            userAgent: getRandomUserAgent(),
+            locale: 'en-GB',
+            timezoneId: 'Europe/London',
+            viewport: { width: 1365, height: 768 },
+            ignoreHTTPSErrors: true,
+        });
+
+        await context.addInitScript(() => {
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-GB', 'en'] });
+        });
+
+        const page = await context.newPage();
+        page.setDefaultTimeout(BROWSER_TIMEOUT_MS);
+        page.setDefaultNavigationTimeout(BROWSER_TIMEOUT_MS);
+        await page.setExtraHTTPHeaders(DEFAULT_HEADERS);
+
+        let response;
+        try {
+            response = await page.goto(url, { waitUntil: BROWSER_WAIT_UNTIL, timeout: BROWSER_TIMEOUT_MS });
+            await page.waitForTimeout(1500);
+            const html = await page.content();
+            const statusCode = response?.status();
+            const blockReason = detectBlockReason({ statusCode, body: html });
+            if (blockReason) {
+                recordBlockEvent({ url, statusCode, reason: `browser_${blockReason}` });
+            }
+            return html;
+        } catch (error) {
+            recordBlockEvent({ url, statusCode: null, reason: `browser_error:${error.message}` });
+            return null;
+        } finally {
+            await page.close().catch(() => {});
+            await context.close().catch(() => {});
+        }
+    });
 
 const safeParseJson = (text) => {
     try {
@@ -645,15 +713,33 @@ const fetchListingsViaApi = async ({ startUrl, page, pageSize, proxyConfiguratio
 
 const fetchListingsViaHtml = async ({ url, proxyConfiguration }) => {
     const response = await requestPage({ url, proxyConfiguration, responseType: 'text', referer: url });
-    if (response.statusCode !== 200 || !response.body) return [];
-    return extractListingsFromHtml(response.body);
+    const blockReason = detectBlockReason(response);
+    if (response.statusCode === 200 && response.body && !blockReason) {
+        return extractListingsFromHtml(response.body);
+    }
+
+    if (blockReason) {
+        const html = await fetchViaBrowser({ url, proxyConfiguration });
+        return html ? extractListingsFromHtml(html) : [];
+    }
+
+    return response.body ? extractListingsFromHtml(response.body) : [];
 };
 
 const fetchListingDetail = async ({ url, proxyConfiguration }) => {
     if (!url) return null;
     const response = await requestPage({ url, proxyConfiguration, responseType: 'text', referer: BASE_URL });
-    if (response.statusCode !== 200 || !response.body) return null;
-    return parseDetailHtml(response.body);
+    const blockReason = detectBlockReason(response);
+    if (response.statusCode === 200 && response.body && !blockReason) {
+        return parseDetailHtml(response.body);
+    }
+
+    if (blockReason) {
+        const html = await fetchViaBrowser({ url, proxyConfiguration });
+        return html ? parseDetailHtml(html) : null;
+    }
+
+    return response.body ? parseDetailHtml(response.body) : null;
 };
 
 const fetchSitemapUrls = async ({ limit, proxyConfiguration }) => {
@@ -900,5 +986,6 @@ try {
     log.error(`Actor failed: ${error.message}`);
     throw error;
 } finally {
+    await closeBrowser();
     await Actor.exit();
 }
