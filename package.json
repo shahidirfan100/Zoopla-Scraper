@@ -1,12 +1,14 @@
 {
   "name": "zoopla-property-scraper",
-  "version": "2.0.0",
-  "description": "Fast, stealthy Zoopla property scraper using JSON-LD extraction with Apify best practices",
+  "version": "2.2.0",
+  "description": "Stealthy Zoopla property scraper using PlaywrightCrawler with Camoufox for Cloudflare bypass",
   "type": "module",
   "dependencies": {
     "apify": "^3.5.3",
-    "crawlee": "^3.15.3",
-    "cheerio": "^1.0.0-rc.12"
+    "@crawlee/playwright": "^3.15.3",
+    "cheerio": "^1.0.0-rc.12",
+    "camoufox-js": "^0.7.0",
+    "playwright": "1.56.1"
   },
   "devDependencies": {
     "@apify/eslint-config": "^1.0.0",

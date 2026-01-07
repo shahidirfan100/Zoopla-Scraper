@@ -1,5 +1,13 @@
+/**
+ * Zoopla Property Scraper - Production Ready
+ * Uses PlaywrightCrawler with Camoufox for Cloudflare bypass
+ * Based on Apify's official Crawlee + Playwright + Camoufox template
+ */
+
+import { PlaywrightCrawler } from '@crawlee/playwright';
 import { Actor, Dataset, log } from 'apify';
-import { CheerioCrawler, Configuration } from 'crawlee';
+import { launchOptions as camoufoxLaunchOptions } from 'camoufox-js';
+import { firefox } from 'playwright';
 import { load as cheerioLoad } from 'cheerio';
 
 // ============================================================================
@@ -7,63 +15,12 @@ import { load as cheerioLoad } from 'cheerio';
 // ============================================================================
 const BASE_URL = 'https://www.zoopla.co.uk';
 const DEFAULT_START_URL = 'https://www.zoopla.co.uk/for-sale/property/london/?q=London&search_source=home&recent_search=true';
-const DEFAULT_PAGE_SIZE = 25;
-const DEFAULT_MAX_CONCURRENCY = 3;
-const BROWSER_TIMEOUT_MS = 60000;
-
-// Realistic UK-based User Agents (Chrome, Firefox, Safari)
-const USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:134.0) Gecko/20100101 Firefox/134.0',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15',
-    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-];
-
-// Full browser-like headers with sec-ch-* client hints (Apify recommended)
-const getStealthHeaders = (userAgent) => {
-    const isChrome = userAgent.includes('Chrome') && !userAgent.includes('Firefox');
-    const isFirefox = userAgent.includes('Firefox');
-
-    const headers = {
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Accept-Language': 'en-GB,en;q=0.9,en-US;q=0.8',
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache',
-        'Upgrade-Insecure-Requests': '1',
-        'User-Agent': userAgent,
-        'Referer': BASE_URL,
-    };
-
-    // Add Chrome-specific client hints (helps bypass fingerprinting)
-    if (isChrome) {
-        headers['sec-ch-ua'] = '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"';
-        headers['sec-ch-ua-mobile'] = '?0';
-        headers['sec-ch-ua-platform'] = userAgent.includes('Windows') ? '"Windows"' :
-            userAgent.includes('Macintosh') ? '"macOS"' : '"Linux"';
-        headers['sec-fetch-dest'] = 'document';
-        headers['sec-fetch-mode'] = 'navigate';
-        headers['sec-fetch-site'] = 'same-origin';
-        headers['sec-fetch-user'] = '?1';
-    }
-
-    return headers;
-};
 
 // ============================================================================
 // UTILITY FUNCTIONS
 // ============================================================================
-const getRandomUserAgent = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+const cleanText = (text) => (text ? String(text).replace(/\s+/g, ' ').trim() : null);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const cleanText = (text) => (text ? text.replace(/\s+/g, ' ').trim() : null);
-
-const pickFirst = (...values) => {
-    for (const value of values) {
-        if (value !== null && value !== undefined && value !== '') return value;
-    }
-    return null;
-};
 
 const ensureAbsoluteUrl = (url) => {
     if (!url) return null;
@@ -111,12 +68,8 @@ const safeParseJson = (text) => {
 };
 
 // ============================================================================
-// JSON-LD EXTRACTION (PRIMARY METHOD - Works on Zoopla!)
+// JSON-LD EXTRACTION (PRIMARY METHOD)
 // ============================================================================
-/**
- * Extract property listings from JSON-LD structured data.
- * Zoopla uses SearchResultsPage -> mainEntity (ItemList) -> itemListElement[]
- */
 const extractListingsFromJsonLd = (html) => {
     const $ = cheerioLoad(html);
     const listings = [];
@@ -129,11 +82,39 @@ const extractListingsFromJsonLd = (html) => {
         const data = safeParseJson(raw);
         if (!data) return;
 
-        // Handle both direct objects and arrays
         const items = Array.isArray(data) ? data : [data];
 
         for (const item of items) {
-            // Look for SearchResultsPage with ItemList
+            // ItemList structure
+            if (item['@type'] === 'ItemList' && item.itemListElement) {
+                for (const listItem of item.itemListElement) {
+                    const property = listItem.item || listItem;
+                    const url = ensureAbsoluteUrl(property.url || property['@id']);
+                    const listingId = extractListingId(url);
+                    const key = listingId || url;
+
+                    if (!key || seen.has(key)) continue;
+                    seen.add(key);
+
+                    const addr = property.address || {};
+                    const offers = property.offers || {};
+
+                    listings.push({
+                        listingId,
+                        url,
+                        title: cleanText(property.name),
+                        description: cleanText(property.description),
+                        image: property.image,
+                        address: cleanText(typeof addr === 'string' ? addr : addr.streetAddress),
+                        locality: cleanText(addr.addressLocality),
+                        price: offers.price || null,
+                        priceCurrency: offers.priceCurrency || 'GBP',
+                        source: 'json-ld',
+                    });
+                }
+            }
+
+            // SearchResultsPage structure
             if (item['@type'] === 'SearchResultsPage' && item.mainEntity) {
                 const listItems = item.mainEntity.itemListElement || [];
                 for (const listItem of listItems) {
@@ -145,49 +126,29 @@ const extractListingsFromJsonLd = (html) => {
                     if (!key || seen.has(key)) continue;
                     seen.add(key);
 
+                    const addr = property.address || {};
+                    const offers = property.offers || {};
+
                     listings.push({
                         listingId,
                         url,
                         title: cleanText(property.name),
                         description: cleanText(property.description),
                         image: property.image,
-                        price: property.offers?.price || null,
-                        priceCurrency: property.offers?.priceCurrency || 'GBP',
+                        address: cleanText(typeof addr === 'string' ? addr : addr.streetAddress),
+                        locality: cleanText(addr.addressLocality),
+                        price: offers.price || null,
+                        priceCurrency: offers.priceCurrency || 'GBP',
                         source: 'json-ld',
                     });
                 }
             }
 
-            // Also check for RealEstateListing or Product offers (detail pages)
-            if (['RealEstateListing', 'Product', 'Residence', 'Apartment', 'House'].includes(item['@type'])) {
-                const url = ensureAbsoluteUrl(item.url || item['@id']);
-                const listingId = extractListingId(url);
-                const key = listingId || url;
-
-                if (!key || seen.has(key)) continue;
-                seen.add(key);
-
-                const offered = item.itemOffered || item;
-                const offer = Array.isArray(item.offers) ? item.offers[0] : item.offers;
-
-                listings.push({
-                    listingId,
-                    url,
-                    title: cleanText(offered.name || item.name),
-                    description: cleanText(offered.description || item.description),
-                    image: offered.image || item.image,
-                    price: offer?.price || null,
-                    priceCurrency: offer?.priceCurrency || 'GBP',
-                    source: 'json-ld',
-                });
-            }
-
-            // Handle @graph structures
+            // @graph structures
             if (item['@graph'] && Array.isArray(item['@graph'])) {
                 for (const graphItem of item['@graph']) {
-                    if (graphItem['@type'] === 'ItemList') {
-                        const listItems = graphItem.itemListElement || [];
-                        for (const listItem of listItems) {
+                    if (graphItem['@type'] === 'ItemList' && graphItem.itemListElement) {
+                        for (const listItem of graphItem.itemListElement) {
                             const property = listItem.item || listItem;
                             const url = ensureAbsoluteUrl(property.url || property['@id']);
                             const listingId = extractListingId(url);
@@ -196,14 +157,19 @@ const extractListingsFromJsonLd = (html) => {
                             if (!key || seen.has(key)) continue;
                             seen.add(key);
 
+                            const addr = property.address || {};
+                            const offers = property.offers || {};
+
                             listings.push({
                                 listingId,
                                 url,
                                 title: cleanText(property.name),
                                 description: cleanText(property.description),
                                 image: property.image,
-                                price: property.offers?.price || null,
-                                priceCurrency: property.offers?.priceCurrency || 'GBP',
+                                address: cleanText(typeof addr === 'string' ? addr : addr.streetAddress),
+                                locality: cleanText(addr.addressLocality),
+                                price: offers.price || null,
+                                priceCurrency: offers.priceCurrency || 'GBP',
                                 source: 'json-ld',
                             });
                         }
@@ -217,82 +183,20 @@ const extractListingsFromJsonLd = (html) => {
 };
 
 // ============================================================================
-// HTML ENRICHMENT (SECONDARY - For additional fields)
+// HTML EXTRACTION (FALLBACK with correct data-testid selectors)
 // ============================================================================
-/**
- * Extract additional listing data from HTML cards that isn't in JSON-LD.
- * Extracts: beds, baths, address, propertyType, agentName
- */
-const enrichListingsFromHtml = (html, listings) => {
-    const $ = cheerioLoad(html);
-    const enriched = [];
-
-    // Build a map of listing cards by URL for quick lookup
-    const cardDataMap = new Map();
-
-    // Find all listing cards
-    $('a[href^="/for-sale/details/"]').each((_, el) => {
-        const href = $(el).attr('href');
-        const url = ensureAbsoluteUrl(href);
-        const listingId = extractListingId(url);
-        const key = listingId || url;
-
-        if (!key) return;
-
-        // Navigate up to find the card container
-        const card = $(el).closest('[data-testid]').length
-            ? $(el).closest('[data-testid]')
-            : $(el).parent().parent().parent();
-
-        // Extract data from the card
-        const beds = parseNumber(card.find('[data-testid="beds"], .num-beds, .beds').first().text());
-        const baths = parseNumber(card.find('[data-testid="baths"], .num-baths, .baths').first().text());
-        const address = cleanText(card.find('[data-testid="address"], .address, [data-testid="listing-address"]').first().text());
-        const priceText = cleanText(card.find('[data-testid="price"], .price, [data-testid="listing-price"]').first().text());
-        const propertyType = cleanText(card.find('[data-testid="property-type"], .property-type').first().text());
-        const agentName = cleanText(card.find('[data-testid="agent-name"], .agent__name, .agent-name').first().text());
-
-        cardDataMap.set(key, {
-            beds,
-            baths,
-            address,
-            priceText,
-            propertyType,
-            agentName,
-        });
-    });
-
-    // Enrich listings with HTML data
-    for (const listing of listings) {
-        const key = listing.listingId || listing.url;
-        const htmlData = cardDataMap.get(key) || {};
-
-        enriched.push({
-            ...listing,
-            beds: htmlData.beds || null,
-            baths: htmlData.baths || null,
-            address: htmlData.address || null,
-            propertyType: htmlData.propertyType || null,
-            agentName: htmlData.agentName || null,
-            // Keep JSON-LD price if available, otherwise use HTML price
-            price: listing.price || parsePriceValue(htmlData.priceText) || null,
-            priceText: htmlData.priceText || null,
-        });
-    }
-
-    return enriched;
-};
-
-/**
- * Fallback: Extract listings directly from HTML if JSON-LD fails.
- */
-const extractListingsFromHtmlDirect = (html) => {
+const extractListingsFromHtml = (html) => {
     const $ = cheerioLoad(html);
     const listings = [];
     const seen = new Set();
 
+    // Find all property links
     $('a[href^="/for-sale/details/"]').each((_, el) => {
         const href = $(el).attr('href');
+
+        // Skip contact/enquiry links
+        if (href && href.includes('/contact/')) return;
+
         const url = ensureAbsoluteUrl(href);
         const listingId = extractListingId(url);
         const key = listingId || url;
@@ -300,16 +204,58 @@ const extractListingsFromHtmlDirect = (html) => {
         if (!key || seen.has(key)) return;
         seen.add(key);
 
-        const card = $(el).closest('[data-testid]').length
-            ? $(el).closest('[data-testid]')
-            : $(el).parent().parent().parent();
+        // Navigate up to find the card container
+        let card = $(el);
+        for (let i = 0; i < 10; i++) {
+            card = card.parent();
+            if (!card.length) break;
 
-        const title = cleanText(card.find('h2, [data-testid="listing-title"]').first().text());
-        const priceText = cleanText(card.find('[data-testid="price"], .price').first().text());
-        const address = cleanText(card.find('[data-testid="address"], .address').first().text());
-        const beds = parseNumber(card.find('[data-testid="beds"], .num-beds').first().text());
-        const baths = parseNumber(card.find('[data-testid="baths"], .num-baths').first().text());
-        const image = card.find('img').first().attr('src');
+            // Check if this is a listing card
+            const testId = card.attr('data-testid') || '';
+            if (testId.includes('result') || testId.includes('listing') || card.is('article')) break;
+            if (card.find('[data-testid="listing-price"]').length > 0) break;
+        }
+
+        // Extract using data-testid selectors (most reliable)
+        const title = cleanText(
+            card.find('[data-testid="listing-title"]').first().text() ||
+            card.find('h2').first().text() ||
+            card.find('h3').first().text()
+        );
+
+        const priceText = cleanText(
+            card.find('[data-testid="listing-price"]').first().text() ||
+            card.find('[data-testid="price"]').first().text()
+        );
+
+        const address = cleanText(
+            card.find('[data-testid="listing-address"]').first().text() ||
+            card.find('address').first().text()
+        );
+
+        const beds = parseNumber(
+            card.find('[data-testid="bed"]').first().text() ||
+            card.find('[data-testid="beds"]').first().text()
+        );
+
+        const baths = parseNumber(
+            card.find('[data-testid="bath"]').first().text() ||
+            card.find('[data-testid="baths"]').first().text()
+        );
+
+        const image = ensureAbsoluteUrl(
+            card.find('[data-testid="listing-photo"]').first().attr('src') ||
+            card.find('img').first().attr('src')
+        );
+
+        const description = cleanText(
+            card.find('[data-testid="listing-description"]').first().text()
+        );
+
+        const agentName = cleanText(
+            card.find('[data-testid="listing-agent"]').first().text() ||
+            card.find('[data-testid="agent-name"]').first().text()
+        );
 
         listings.push({
             listingId,
@@ -318,9 +264,13 @@ const extractListingsFromHtmlDirect = (html) => {
             price: parsePriceValue(priceText),
             priceText,
             address,
+            postalCode: extractUkPostcode(address),
             beds,
             baths,
-            image: ensureAbsoluteUrl(image),
+            image,
+            description,
+            agentName,
+            priceCurrency: 'GBP',
             source: 'html',
         });
     });
@@ -329,137 +279,35 @@ const extractListingsFromHtmlDirect = (html) => {
 };
 
 // ============================================================================
-// DETAIL PAGE PARSING
+// MERGE LISTINGS FROM BOTH SOURCES
 // ============================================================================
-const DETAIL_SELECTORS = {
-    title: ['h1', '[data-testid="listing-title"]', '[data-testid="property-title"]'],
-    price: ['[data-testid="price"]', '[data-testid="listing-price"]', '.price', '.listing-price'],
-    address: ['[data-testid="address"]', '.address', '.property-address', 'h1'],
-    propertyType: ['[data-testid="property-type"]', '.property-type'],
-    beds: ['[data-testid="beds"]', '[data-testid="property-bedrooms"]', '.beds', '.num-bedrooms'],
-    baths: ['[data-testid="baths"]', '[data-testid="property-bathrooms"]', '.baths', '.num-bathrooms'],
-    floorArea: ['[data-testid="floor-area"]', '.floor-area', '.listing-floor-area'],
-    tenure: ['[data-testid="tenure"]', '.tenure'],
-    description: ['[data-testid="description"]', '[data-testid="listing-description"]', '.listing-description', '.property-description'],
-    features: ['[data-testid="key-features"] li', '.key-features li', '.property-features li'],
-    agentName: ['[data-testid="agent-name"]', '.agent__name', '.listing-agent__name', '.agent-name'],
-};
+const mergeListings = (jsonLdListings, htmlListings) => {
+    const merged = new Map();
 
-const getFirstText = ($, selectors) => {
-    for (const selector of selectors) {
-        const text = cleanText($(selector).first().text());
-        if (text) return text;
+    // Add JSON-LD listings first (primary)
+    for (const listing of jsonLdListings) {
+        const key = listing.listingId || listing.url;
+        if (key) merged.set(key, { ...listing });
     }
-    return null;
-};
 
-const getAllText = ($, selectors) => {
-    const results = new Set();
-    for (const selector of selectors) {
-        $(selector).each((_, el) => {
-            const text = cleanText($(el).text());
-            if (text) results.add(text);
-        });
-    }
-    return results.size ? Array.from(results) : null;
-};
+    // Merge HTML data (fills missing fields)
+    for (const listing of htmlListings) {
+        const key = listing.listingId || listing.url;
+        if (!key) continue;
 
-const normalizeImages = (images) => {
-    if (!images) return null;
-    const list = Array.isArray(images) ? images : [images];
-    const urls = list
-        .map((img) => (typeof img === 'string' ? img : img?.url || img?.contentUrl))
-        .filter(Boolean)
-        .map(ensureAbsoluteUrl);
-    return urls.length ? Array.from(new Set(urls)) : null;
-};
-
-const parseDetailFromJsonLd = (html) => {
-    const $ = cheerioLoad(html);
-
-    let detailData = null;
-
-    $('script[type="application/ld+json"]').each((_, el) => {
-        const raw = $(el).html();
-        if (!raw) return;
-
-        const data = safeParseJson(raw);
-        if (!data) return;
-
-        const items = Array.isArray(data) ? data : (data['@graph'] || [data]);
-
-        for (const item of items) {
-            if (['RealEstateListing', 'Product', 'Residence', 'Apartment', 'House', 'SingleFamilyResidence'].includes(item['@type'])) {
-                const offered = item.itemOffered || item;
-                const offer = Array.isArray(item.offers) ? item.offers[0] : item.offers;
-                const address = offered.address || item.address || {};
-                const geo = offered.geo || item.geo || {};
-
-                detailData = {
-                    title: cleanText(offered.name || item.name),
-                    description: cleanText(offered.description || item.description),
-                    price: offer?.price || null,
-                    priceCurrency: offer?.priceCurrency || 'GBP',
-                    address: typeof address === 'string' ? address : cleanText(address.streetAddress),
-                    postalCode: cleanText(address.postalCode),
-                    locality: cleanText(address.addressLocality),
-                    region: cleanText(address.addressRegion),
-                    country: cleanText(address.addressCountry?.name || address.addressCountry),
-                    propertyType: cleanText(offered['@type'] || item.category),
-                    beds: parseNumber(offered.numberOfRooms || offered.numberOfBedrooms),
-                    baths: parseNumber(offered.numberOfBathroomsTotal || offered.numberOfBathrooms),
-                    floorArea: offered.floorSize?.value || null,
-                    images: normalizeImages(offered.image || item.image),
-                    latitude: geo.latitude || null,
-                    longitude: geo.longitude || null,
-                };
-                return false; // Stop iteration once found
+        if (merged.has(key)) {
+            const existing = merged.get(key);
+            for (const [field, value] of Object.entries(listing)) {
+                if (existing[field] === null || existing[field] === undefined) {
+                    existing[field] = value;
+                }
             }
+        } else {
+            merged.set(key, { ...listing });
         }
-    });
+    }
 
-    return detailData;
-};
-
-const parseDetailHtml = (html) => {
-    const $ = cheerioLoad(html);
-
-    // Try JSON-LD first (most reliable)
-    const jsonLdData = parseDetailFromJsonLd(html) || {};
-
-    // Fallback to HTML selectors
-    const title = pickFirst(jsonLdData.title, getFirstText($, DETAIL_SELECTORS.title));
-    const priceText = pickFirst(jsonLdData.price, getFirstText($, DETAIL_SELECTORS.price));
-    const addressText = pickFirst(jsonLdData.address, getFirstText($, DETAIL_SELECTORS.address));
-    const features = getAllText($, DETAIL_SELECTORS.features);
-    const images = pickFirst(
-        jsonLdData.images,
-        normalizeImages($('meta[property="og:image"]').attr('content'))
-    );
-    const agentName = getFirstText($, DETAIL_SELECTORS.agentName);
-
-    return {
-        title,
-        price: priceText,
-        priceValue: parsePriceValue(priceText) || jsonLdData.price,
-        priceCurrency: jsonLdData.priceCurrency || 'GBP',
-        address: addressText,
-        postalCode: pickFirst(jsonLdData.postalCode, extractUkPostcode(addressText)),
-        locality: jsonLdData.locality || null,
-        region: jsonLdData.region || null,
-        country: jsonLdData.country || null,
-        propertyType: pickFirst(jsonLdData.propertyType, getFirstText($, DETAIL_SELECTORS.propertyType)),
-        beds: pickFirst(jsonLdData.beds, parseNumber(getFirstText($, DETAIL_SELECTORS.beds))),
-        baths: pickFirst(jsonLdData.baths, parseNumber(getFirstText($, DETAIL_SELECTORS.baths))),
-        floorArea: pickFirst(jsonLdData.floorArea, getFirstText($, DETAIL_SELECTORS.floorArea)),
-        tenure: getFirstText($, DETAIL_SELECTORS.tenure),
-        description: pickFirst(jsonLdData.description, getFirstText($, DETAIL_SELECTORS.description)),
-        features: features?.length ? Array.from(new Set(features)) : null,
-        images,
-        agentName,
-        latitude: jsonLdData.latitude || null,
-        longitude: jsonLdData.longitude || null,
-    };
+    return Array.from(merged.values());
 };
 
 // ============================================================================
@@ -473,23 +321,6 @@ const buildSearchUrlForPage = (startUrl, page) => {
         url.searchParams.delete('pn');
     }
     return url.toString();
-};
-
-// ============================================================================
-// DETECTION HELPERS
-// ============================================================================
-const detectBlockReason = (response) => {
-    if (!response) return null;
-    const statusCode = response.statusCode || response.status;
-    if ([403, 429, 503].includes(statusCode)) return `HTTP_${statusCode}`;
-
-    const body = typeof response.body === 'string' ? response.body : '';
-    if (!body) return null;
-
-    if (/just a moment|verify you are human|captcha|enable javascript|cloudflare/i.test(body)) {
-        return 'cloudflare_challenge';
-    }
-    return null;
 };
 
 // ============================================================================
@@ -508,41 +339,33 @@ try {
         const message = 'Missing required field: startUrl or startUrls.';
         log.error(message);
         await Actor.setStatusMessage(message);
-        await Actor.setValue('INPUT_VALIDATION_ERROR', { message, timestamp: new Date().toISOString() });
         await Actor.exit({ exitCode: 1 });
     }
 
     const resultsWanted = Math.max(1, Number.isFinite(+input.results_wanted) ? +input.results_wanted : 50);
-    const maxPages = Math.max(1, Number.isFinite(+input.max_pages) ? +input.max_pages : 10);
-    const collectDetails = input.collectDetails !== false;
-    const maxConcurrency = Math.min(DEFAULT_MAX_CONCURRENCY, input.maxConcurrency || DEFAULT_MAX_CONCURRENCY);
+    const maxPages = Math.max(1, Number.isFinite(+input.max_pages) ? +input.max_pages : 5);
+    const maxConcurrency = Math.min(2, input.maxConcurrency || 1);
 
-    // Proxy configuration with Apify recommendations
-    const proxyConfiguration = input.proxyConfiguration
-        ? await Actor.createProxyConfiguration({ ...input.proxyConfiguration })
-        : await Actor.createProxyConfiguration({
-            useApifyProxy: true,
-            apifyProxyGroups: ['RESIDENTIAL'],
-            countryCode: 'GB', // UK proxies for Zoopla
-        });
+    // Proxy configuration - UK residential proxies required
+    // checkAccess ensures credentials are valid
+    const proxyConfiguration = await Actor.createProxyConfiguration({
+        ...input.proxyConfiguration,
+        checkAccess: true,
+    });
 
     log.info('Zoopla Scraper Starting', {
         targets: startUrls?.length || 1,
         resultsWanted,
         maxPages,
-        collectDetails,
         maxConcurrency,
-        proxyCountry: 'GB',
     });
 
     // State management
     const seen = new Set();
-    const blockEvents = [];
     const stats = {
         pagesProcessed: 0,
         listingsSaved: 0,
         methodsUsed: new Set(),
-        blockedRequests: 0,
     };
     let saved = 0;
 
@@ -554,92 +377,110 @@ try {
         for (let page = 1; page <= maxPages; page++) {
             initialRequests.push({
                 url: buildSearchUrlForPage(target, page),
-                userData: {
-                    type: 'search',
-                    page,
-                    startUrl: target,
-                },
+                userData: { type: 'search', page },
             });
         }
     }
 
-    // Create CheerioCrawler with Apify stealth recommendations
-    const crawler = new CheerioCrawler({
+    // Create PlaywrightCrawler with Camoufox
+    // Following Apify's official template pattern
+    const crawler = new PlaywrightCrawler({
         proxyConfiguration,
         maxConcurrency,
         maxRequestRetries: 3,
-        requestHandlerTimeoutSecs: 60,
+        requestHandlerTimeoutSecs: 120,
+        navigationTimeoutSecs: 60,
 
-        // Stealth: Add realistic delays between requests
-        minConcurrency: 1,
-        maxRequestsPerMinute: 30, // Avoid rate limiting
+        // Camoufox launch configuration - exactly as in Apify template
+        launchContext: {
+            launcher: firefox,
+            launchOptions: await camoufoxLaunchOptions({
+                headless: true,
+                // Pass proxy URL for geoip matching
+                proxy: proxyConfiguration ? await proxyConfiguration.newUrl() : undefined,
+                // Enable GeoIP for location-based fingerprinting
+                geoip: true,
+                // Optional: Custom fonts for better fingerprint
+                // fonts: ['Arial', 'Times New Roman', 'Verdana'],
+            }),
+        },
 
-        // Pre-navigation hook: Set stealth headers
+        // Browser pool settings
+        browserPoolOptions: {
+            maxOpenPagesPerBrowser: 1,
+            retireBrowserAfterPageCount: 3,
+        },
+
+        // Pre-navigation to add human-like behavior
         preNavigationHooks: [
-            async ({ request }) => {
-                const userAgent = getRandomUserAgent();
-                request.headers = {
-                    ...getStealthHeaders(userAgent),
-                    ...request.headers,
-                };
+            async ({ page }) => {
+                // Random delay before navigation
+                await sleep(1000 + Math.random() * 2000);
 
-                // Add random delay to mimic human behavior
-                await sleep(500 + Math.random() * 1500);
+                // Set UK locale and timezone
+                await page.emulateTimezone ? page.emulateTimezone('Europe/London') : null;
+            },
+        ],
+
+        // Post-navigation for waiting and scrolling
+        postNavigationHooks: [
+            async ({ page }) => {
+                // Wait for page to stabilize
+                await page.waitForLoadState('domcontentloaded');
+                await sleep(1500 + Math.random() * 1000);
+
+                // Scroll to trigger lazy loading (human-like)
+                await page.evaluate(() => {
+                    window.scrollBy(0, 300);
+                });
+                await sleep(500);
+                await page.evaluate(() => {
+                    window.scrollBy(0, 500);
+                });
+                await sleep(500);
             },
         ],
 
         // Main request handler
-        async requestHandler({ request, $, body, response }) {
-            const { type, page, startUrl: targetUrl } = request.userData;
-
-            // Check for blocks
-            const blockReason = detectBlockReason(response);
-            if (blockReason) {
-                stats.blockedRequests++;
-                blockEvents.push({
-                    url: request.url,
-                    statusCode: response?.statusCode,
-                    reason: blockReason,
-                    timestamp: new Date().toISOString(),
-                });
-                log.warning(`Blocked (${blockReason}): ${request.url}`);
-                return; // Skip blocked pages
-            }
+        async requestHandler({ request, page }) {
+            const { type, page: pageNum } = request.userData;
 
             if (saved >= resultsWanted) {
-                log.debug('Results limit reached, skipping request');
+                log.debug('Results limit reached, skipping');
                 return;
             }
 
+            // Check for Cloudflare challenge
+            const pageContent = await page.content();
+            if (pageContent.includes('Just a moment') || pageContent.includes('Verify you are human')) {
+                log.warning(`Cloudflare challenge on page ${pageNum}, waiting for resolution...`);
+                await sleep(5000);
+                await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
+            }
+
             if (type === 'search') {
-                log.debug(`Processing search page ${page}: ${request.url}`);
+                log.info(`Processing search page ${pageNum}: ${request.url}`);
 
-                // Primary: Extract from JSON-LD
-                let listings = extractListingsFromJsonLd(body);
+                const html = await page.content();
 
-                if (listings.length > 0) {
-                    stats.methodsUsed.add('json-ld');
-                    log.debug(`Found ${listings.length} listings via JSON-LD on page ${page}`);
+                // Dual extraction: JSON-LD + HTML
+                const jsonLdListings = extractListingsFromJsonLd(html);
+                const htmlListings = extractListingsFromHtml(html);
+                const listings = mergeListings(jsonLdListings, htmlListings);
 
-                    // Enrich with HTML data (beds, baths, etc.)
-                    listings = enrichListingsFromHtml(body, listings);
-                } else {
-                    // Fallback: Direct HTML extraction
-                    listings = extractListingsFromHtmlDirect(body);
-                    if (listings.length > 0) {
-                        stats.methodsUsed.add('html');
-                        log.debug(`Found ${listings.length} listings via HTML on page ${page}`);
-                    }
-                }
+                if (jsonLdListings.length > 0) stats.methodsUsed.add('json-ld');
+                if (htmlListings.length > 0) stats.methodsUsed.add('html');
+
+                log.info(`Found ${listings.length} listings on page ${pageNum} (JSON-LD: ${jsonLdListings.length}, HTML: ${htmlListings.length})`);
 
                 if (!listings.length) {
-                    log.debug(`No listings found on page ${page}`);
+                    log.warning(`No listings found on page ${pageNum} - possible block`);
                     return;
                 }
 
                 stats.pagesProcessed++;
 
-                // Process each listing
+                // Process listings
                 for (const listing of listings) {
                     if (saved >= resultsWanted) break;
 
@@ -647,7 +488,6 @@ try {
                     if (!key || seen.has(key)) continue;
                     seen.add(key);
 
-                    // Build property object
                     const property = {
                         listingId: listing.listingId || null,
                         url: listing.url,
@@ -655,9 +495,10 @@ try {
                         price: listing.price || null,
                         priceValue: parsePriceValue(listing.price) || null,
                         priceCurrency: listing.priceCurrency || 'GBP',
-                        priceText: listing.priceText || null,
+                        priceText: listing.priceText || (listing.price ? `£${listing.price.toLocaleString()}` : null),
                         address: listing.address || null,
-                        postalCode: extractUkPostcode(listing.address),
+                        postalCode: listing.postalCode || extractUkPostcode(listing.address),
+                        locality: listing.locality || null,
                         beds: listing.beds || null,
                         baths: listing.baths || null,
                         propertyType: listing.propertyType || null,
@@ -672,52 +513,25 @@ try {
                     saved++;
                     stats.listingsSaved = saved;
 
-                    // Log progress every 10 items
                     if (saved % 10 === 0) {
                         log.info(`Progress: ${saved}/${resultsWanted} listings saved`);
                     }
                 }
-
-            } else if (type === 'detail') {
-                // Detail page processing (if collectDetails is enabled)
-                log.debug(`Processing detail page: ${request.url}`);
-
-                const detail = parseDetailHtml(body);
-                const listingId = extractListingId(request.url);
-
-                const property = {
-                    listingId,
-                    url: request.url,
-                    ...detail,
-                    source: 'detail',
-                    scrapedAt: new Date().toISOString(),
-                };
-
-                await Dataset.pushData(property);
-                saved++;
-                stats.listingsSaved = saved;
             }
         },
 
         // Error handling
         async failedRequestHandler({ request, error }) {
             log.error(`Request failed: ${request.url}`, { error: error.message });
-            stats.blockedRequests++;
         },
     });
 
-    // Run the crawler
+    // Run crawler
     await crawler.run(initialRequests);
 
-    // Save diagnostics
-    if (blockEvents.length) {
-        await Actor.setValue('BLOCKED_REQUESTS', blockEvents);
-    }
-
+    // Final status
     if (saved === 0) {
-        const message = stats.blockedRequests > 0
-            ? `No listings scraped. ${stats.blockedRequests} requests were blocked. Try using residential proxies.`
-            : 'No listings were scraped. Review the logs for details.';
+        const message = 'No listings scraped. Ensure RESIDENTIAL proxies with countryCode: GB are configured.';
         log.warning(message);
         await Actor.setStatusMessage(message);
     } else {
@@ -725,15 +539,14 @@ try {
             listingsSaved: saved,
             pagesProcessed: stats.pagesProcessed,
             methodsUsed: Array.from(stats.methodsUsed),
-            blockedRequests: stats.blockedRequests,
         };
-        log.info(`Scraping complete!`, summary);
+        log.info('Scraping complete!', summary);
         await Actor.setStatusMessage(`Successfully scraped ${saved} listings`);
         await Actor.setValue('RUN_SUMMARY', summary);
     }
 
 } catch (error) {
-    log.error(`Actor failed: ${error.message}`);
+    log.error(`Actor failed: ${error.message}`, { stack: error.stack });
     await Actor.setStatusMessage(`Failed: ${error.message}`);
     throw error;
 } finally {

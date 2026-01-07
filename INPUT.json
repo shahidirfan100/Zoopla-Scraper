@@ -1,8 +1,8 @@
 {
   "startUrl": "https://www.zoopla.co.uk/for-sale/property/london/?q=London&search_source=home&recent_search=true",
   "results_wanted": 50,
-  "max_pages": 10,
-  "collectDetails": false,
+  "max_pages": 5,
+  "maxConcurrency": 2,
   "proxyConfiguration": {
     "useApifyProxy": true,
     "apifyProxyGroups": [
