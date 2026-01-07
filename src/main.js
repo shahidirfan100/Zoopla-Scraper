@@ -1,16 +1,16 @@
 /**
- * Zoopla Property Scraper - Production Ready v2.6.0
+ * Zoopla Property Scraper - Production Ready v2.7.0
  * 
  * CORRECT SELECTORS (from live browser inspection):
- * - Listing container: div[id^="listing_"] (e.g., div#listing_71962539)
- * - Also has class: dkr2t86
+ * - Listing container: div[id^="listing_"]
  * - Price: p[class*="price_priceText"]
  * - Address: address[class*="summary_address"]
  * - Description: p[class*="summary_summary"]
- * - Amenities (beds/baths): p[class*="amenities_amenityList"] → "1 bed 1 bath 1 reception"
- * - Link: a[href*="/for-sale/details/"]
- * 
- * NOTE: __NEXT_DATA__ does NOT exist on search pages
+ * - Amenities: p[class*="amenities_amenityList"] → "1 bed 1 bath 1 reception"
+ * - Image: div[class*="layoutMediaWrapper"] img
+ * - Agent: img[alt*="Estate Agents"] (alt attribute)
+ * - Property type: Extract from summary text
+ * - Postal code: Extract from end of address
  */
 
 import { PlaywrightCrawler } from '@crawlee/playwright';
@@ -25,6 +25,9 @@ import { load as cheerioLoad } from 'cheerio';
 const BASE_URL = 'https://www.zoopla.co.uk';
 const DEFAULT_START_URL = 'https://www.zoopla.co.uk/for-sale/property/london/?q=London&search_source=home&recent_search=true';
 
+// Property types to search for
+const PROPERTY_TYPES = ['flat', 'apartment', 'house', 'maisonette', 'bungalow', 'studio', 'duplex', 'penthouse', 'townhouse', 'land', 'detached', 'semi-detached', 'terraced', 'cottage'];
+
 // ============================================================================
 // UTILITY FUNCTIONS
 // ============================================================================
@@ -37,15 +40,6 @@ const ensureAbsoluteUrl = (url) => {
     if (url.startsWith('//')) return `https:${url}`;
     if (url.startsWith('http')) return url;
     return `${BASE_URL}${url.startsWith('/') ? '' : '/'}${url}`;
-};
-
-const extractListingId = (url) => {
-    if (!url) return null;
-    const match =
-        url.match(/\/details\/(\d+)/) ||
-        url.match(/\/property\/[^/]+\/(\d+)/) ||
-        url.match(/\/(\d{6,})\/?$/);
-    return match ? match[1] : null;
 };
 
 const extractListingIdFromDivId = (divId) => {
@@ -63,19 +57,31 @@ const parsePriceValue = (value) => {
 
 const extractUkPostcode = (value) => {
     if (!value) return null;
-    const match = String(value).match(/\b[A-Z]{1,2}\d[A-Z\d]?\s?\d[A-Z]{2}\b/i);
-    return match ? match[0].toUpperCase() : null;
+    // UK postcode pattern: 1-2 letters, 1-2 digits, optional space, digit, 2 letters
+    const match = String(value).match(/\b([A-Z]{1,2}\d{1,2}[A-Z]?\s?\d[A-Z]{2})\b/i);
+    return match ? match[1].toUpperCase() : null;
+};
+
+const extractPropertyType = (text) => {
+    if (!text) return null;
+    const lowerText = text.toLowerCase();
+    for (const type of PROPERTY_TYPES) {
+        if (lowerText.includes(type)) {
+            return type.charAt(0).toUpperCase() + type.slice(1);
+        }
+    }
+    return null;
 };
 
 // ============================================================================
-// HTML EXTRACTION - CORRECT SELECTORS FROM BROWSER INSPECTION
+// HTML EXTRACTION
 // ============================================================================
 const extractListingsFromHtml = (html) => {
     const $ = cheerioLoad(html);
     const listings = [];
     const seen = new Set();
 
-    // CORRECT SELECTOR: div[id^="listing_"] - each listing has id like "listing_71962539"
+    // CORRECT: div[id^="listing_"] - each listing has id like "listing_71962539"
     const cards = $('div[id^="listing_"]');
 
     log.info(`Found ${cards.length} listing cards with div[id^="listing_"]`);
@@ -84,22 +90,18 @@ const extractListingsFromHtml = (html) => {
         const card = $(cardEl);
         const divId = card.attr('id');
 
-        // Extract listing ID from div id
         const listingId = extractListingIdFromDivId(divId);
-        if (!listingId) return;
-
-        if (seen.has(listingId)) return;
+        if (!listingId || seen.has(listingId)) return;
         seen.add(listingId);
 
-        // Find the detail link
+        // Link
         const linkEl = card.find('a[href*="/for-sale/details/"]').first();
         const href = linkEl.attr('href');
         const url = ensureAbsoluteUrl(href) || `${BASE_URL}/for-sale/details/${listingId}/`;
 
-        // CORRECT: Price - p[class*="price_priceText"]
+        // Price: p[class*="price_priceText"]
         let priceText = cleanText(card.find('p[class*="price_priceText"]').first().text());
         if (!priceText) {
-            // Fallback: find any text with £
             card.find('p').each((_, el) => {
                 const text = $(el).text();
                 if (!priceText && text.includes('£')) {
@@ -109,24 +111,27 @@ const extractListingsFromHtml = (html) => {
             });
         }
 
-        // CORRECT: Address - address[class*="summary_address"]
+        // Address: address[class*="summary_address"]
         const address = cleanText(
             card.find('address[class*="summary_address"]').first().text() ||
             card.find('address').first().text()
         );
 
-        // CORRECT: Description - p[class*="summary_summary"]
+        // Postal code: Extract from end of address
+        const postalCode = extractUkPostcode(address);
+
+        // Description: p[class*="summary_summary"]
         const description = cleanText(
             card.find('p[class*="summary_summary"]').first().text()
         );
 
-        // CORRECT: Amenities - p[class*="amenities_amenityList"] → "1 bed 1 bath 1 reception"
+        // Amenities: p[class*="amenities_amenityList"]
         const amenitiesText = cleanText(
             card.find('p[class*="amenities_amenityList"]').first().text() ||
             card.find('p[class*="amenities"]').first().text()
         );
 
-        // Parse beds, baths, receptions from amenities text
+        // Parse beds, baths, receptions from amenities
         let beds = null;
         let baths = null;
         let receptions = null;
@@ -141,7 +146,7 @@ const extractListingsFromHtml = (html) => {
             if (receptionsMatch) receptions = Number(receptionsMatch[1]);
         }
 
-        // Fallback: search entire card text for bed/bath patterns
+        // Fallback: search card text
         if (!beds || !baths) {
             const cardText = card.text();
             if (!beds) {
@@ -154,39 +159,48 @@ const extractListingsFromHtml = (html) => {
             }
         }
 
-        // Title from heading or link text
-        const title = cleanText(
-            card.find('h2').first().text() ||
-            card.find('h3').first().text() ||
-            linkEl.text()
-        );
+        // Property type: Extract from summary/description
+        const propertyType = extractPropertyType(description) ||
+            extractPropertyType(amenitiesText) ||
+            extractPropertyType(card.text());
 
-        // Property type from amenities or title
-        let propertyType = null;
-        if (amenitiesText) {
-            // Common types: flat, house, apartment, studio, bungalow
-            const typeMatch = amenitiesText.match(/\b(flat|house|apartment|studio|bungalow|maisonette|cottage|penthouse|detached|semi-detached|terraced)\b/i);
-            if (typeMatch) propertyType = cleanText(typeMatch[1]);
-        }
-        if (!propertyType && title) {
-            const typeMatch = title.match(/\b(flat|house|apartment|studio|bungalow|maisonette|cottage|penthouse)\b/i);
-            if (typeMatch) propertyType = cleanText(typeMatch[1]);
+        // Title: Construct from beds + property type, or use address
+        let title = null;
+        if (beds && propertyType) {
+            title = `${beds} bed ${propertyType} for sale`;
+        } else if (beds) {
+            title = `${beds} bedroom property for sale`;
+        } else {
+            title = cleanText(card.find('h2, h3').first().text()) || address;
         }
 
-        // Image - first img in the card
+        // Image: div[class*="layoutMediaWrapper"] img
         let image = null;
-        const imgEl = card.find('img').first();
-        const imgSrc = imgEl.attr('src') || imgEl.attr('data-src');
-        if (imgSrc) {
-            // Clean up image URL (remove :p suffix if present)
-            image = ensureAbsoluteUrl(imgSrc.split(':p')[0].split('?')[0]);
+        const imgEl = card.find('div[class*="layoutMediaWrapper"] img').first();
+        if (imgEl.length) {
+            image = imgEl.attr('src') || imgEl.attr('data-src');
+        }
+        if (!image) {
+            // Fallback: first img in card
+            const firstImg = card.find('img').first();
+            image = firstImg.attr('src') || firstImg.attr('data-src');
+        }
+        // Clean up image URL
+        if (image) {
+            image = ensureAbsoluteUrl(image.split('?')[0]);
         }
 
-        // Agent name
-        const agentName = cleanText(
-            card.find('[class*="agent"]').first().text() ||
-            card.find('[class*="branch"]').first().text()
-        );
+        // Agent name: img[alt*="Estate Agents"] or img[class*="agent"]
+        let agentName = null;
+        const agentImg = card.find('img[alt*="Estate Agent"], img[alt*="logo"]').first();
+        if (agentImg.length) {
+            agentName = cleanText(agentImg.attr('alt')?.replace(/\s*logo\s*/gi, '').replace(/Estate Agents?/gi, '').trim());
+        }
+        // Fallback: look for agent-related text
+        if (!agentName) {
+            const agentEl = card.find('[class*="agent"], [class*="branch"]').first();
+            agentName = cleanText(agentEl.text());
+        }
 
         listings.push({
             listingId,
@@ -195,7 +209,7 @@ const extractListingsFromHtml = (html) => {
             price: parsePriceValue(priceText),
             priceText,
             address,
-            postalCode: extractUkPostcode(address),
+            postalCode,
             beds,
             baths,
             receptions,
@@ -207,41 +221,6 @@ const extractListingsFromHtml = (html) => {
             source: 'html',
         });
     });
-
-    // Fallback if no div[id^="listing_"] found
-    if (listings.length === 0) {
-        log.warning('No div[id^="listing_"] found, trying fallback with links');
-
-        $('a[href*="/for-sale/details/"]').each((_, el) => {
-            const href = $(el).attr('href');
-            if (!href || href.includes('/contact/')) return;
-
-            const url = ensureAbsoluteUrl(href);
-            const listingId = extractListingId(url);
-
-            if (!listingId || seen.has(listingId)) return;
-            seen.add(listingId);
-
-            listings.push({
-                listingId,
-                url,
-                title: null,
-                price: null,
-                priceText: null,
-                address: null,
-                postalCode: null,
-                beds: null,
-                baths: null,
-                receptions: null,
-                propertyType: null,
-                description: null,
-                image: null,
-                agentName: null,
-                priceCurrency: 'GBP',
-                source: 'html-fallback',
-            });
-        });
-    }
 
     return listings;
 };
@@ -285,10 +264,11 @@ try {
         ...input.proxyConfiguration,
     });
 
-    log.info('Zoopla Scraper v2.6.0 Starting', { resultsWanted, maxPages });
+    log.info('Zoopla Scraper v2.7.0 Starting', { resultsWanted, maxPages });
 
     const seen = new Set();
     let saved = 0;
+    let shouldStop = false;
 
     const targets = startUrls || [startUrl];
     const initialRequests = [];
@@ -331,12 +311,10 @@ try {
                 await page.waitForLoadState('domcontentloaded');
                 await sleep(2000);
 
-                // Wait for listing cards to appear
-                await page.waitForSelector('div[id^="listing_"]', { timeout: 15000 }).catch(() => {
-                    log.debug('Listing cards not found with selector');
-                });
+                // Wait for listing cards
+                await page.waitForSelector('div[id^="listing_"]', { timeout: 15000 }).catch(() => { });
 
-                // Scroll to load all content
+                // Scroll to load content
                 for (let i = 0; i < 5; i++) {
                     await page.evaluate(() => window.scrollBy(0, 500));
                     await sleep(400);
@@ -345,14 +323,18 @@ try {
             },
         ],
 
-        async requestHandler({ request, page }) {
+        async requestHandler({ request, page, crawler: crawlerInstance }) {
             const { page: pageNum } = request.userData;
 
-            if (saved >= resultsWanted) return;
+            // EARLY EXIT: Check if we already have enough
+            if (saved >= resultsWanted || shouldStop) {
+                log.info(`Skipping page ${pageNum} - already have ${saved}/${resultsWanted} listings`);
+                return;
+            }
 
             const pageContent = await page.content();
 
-            // Check for Cloudflare
+            // Cloudflare check
             if (pageContent.includes('Just a moment') || pageContent.includes('Verify you are human')) {
                 log.warning(`Cloudflare on page ${pageNum}, waiting...`);
                 await sleep(10000);
@@ -368,13 +350,14 @@ try {
 
             if (!listings.length) {
                 log.warning(`No listings on page ${pageNum}`);
-                const title = await page.title();
-                log.debug(`Page title: ${title}`);
                 return;
             }
 
             for (const listing of listings) {
-                if (saved >= resultsWanted) break;
+                if (saved >= resultsWanted) {
+                    shouldStop = true;
+                    break;
+                }
 
                 const key = listing.listingId || listing.url;
                 if (!key || seen.has(key)) continue;
@@ -388,6 +371,15 @@ try {
 
                 saved++;
                 if (saved % 10 === 0) log.info(`Progress: ${saved}/${resultsWanted}`);
+            }
+
+            // STOP CRAWLER if we have enough
+            if (saved >= resultsWanted) {
+                shouldStop = true;
+                log.info(`Reached ${saved}/${resultsWanted} listings, stopping crawler...`);
+                // Abort remaining requests
+                const queue = await crawlerInstance.getRequestQueue();
+                await queue.drop();
             }
         },
 
