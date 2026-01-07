@@ -79,6 +79,13 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const cleanText = (text) => (text ? text.replace(/\s+/g, ' ').trim() : null);
 
+const pickFirst = (...values) => {
+    for (const value of values) {
+        if (value !== null && value !== undefined && value !== '') return value;
+    }
+    return null;
+};
+
 const ensureAbsoluteUrl = (url) => {
     if (!url) return null;
     if (url.startsWith('data:')) return url;
@@ -112,6 +119,8 @@ const parseNumber = (value) => {
     if (!numeric) return null;
     return Number(numeric);
 };
+
+const isPlainObject = (value) => value && typeof value === 'object' && !Array.isArray(value);
 
 const extractUkPostcode = (value) => {
     if (!value) return null;
@@ -190,12 +199,23 @@ const fetchViaBrowser = async ({ url, proxyConfiguration }) =>
             timezoneId: 'Europe/London',
             viewport: { width: 1365, height: 768 },
             ignoreHTTPSErrors: true,
+            javaScriptEnabled: true,
         });
 
         await context.addInitScript(() => {
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
             Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
             Object.defineProperty(navigator, 'languages', { get: () => ['en-GB', 'en'] });
+            Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 4 });
+            Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+            window.chrome = window.chrome || { runtime: {} };
+            const originalQuery = window.navigator.permissions?.query;
+            if (originalQuery) {
+                window.navigator.permissions.query = (parameters) =>
+                    parameters.name === 'notifications'
+                        ? Promise.resolve({ state: Notification.permission })
+                        : originalQuery(parameters);
+            }
         });
 
         const page = await context.newPage();
@@ -565,6 +585,114 @@ const extractListingsFromEmbeddedJson = (html) => {
     return results;
 };
 
+const scoreDetailCandidate = (item) => {
+    if (!isPlainObject(item)) return 0;
+    let score = 0;
+    if (item.listing_id || item.listingId || item.id) score += 3;
+    if (item.displayable_address || item.address || item.street_name || item.short_address) score += 3;
+    if (item.price || item.price_formatted || item.price_display) score += 2;
+    if (item.num_bedrooms || item.bedrooms || item.beds) score += 1;
+    if (item.num_bathrooms || item.bathrooms || item.baths) score += 1;
+    if (item.description || item.full_description || item.short_description) score += 1;
+    if (item.images || item.image_list || item.photos) score += 1;
+    return score;
+};
+
+const normalizeDetailFromObject = (item) => {
+    if (!isPlainObject(item)) return null;
+
+    const url =
+        item.details_url ||
+        item.detailsUrl ||
+        item.listing_url ||
+        item.listingUrl ||
+        item.url ||
+        item.uri ||
+        null;
+
+    const listingId = item.listing_id || item.listingId || item.id || extractListingId(url);
+    const address = cleanText(item.displayable_address || item.address || item.street_name || item.short_address);
+    const price = item.price_formatted || item.price_display || item.price || item.price_text || null;
+    const features = Array.isArray(item.feature_list)
+        ? item.feature_list.map(cleanText).filter(Boolean)
+        : Array.isArray(item.features)
+          ? item.features.map(cleanText).filter(Boolean)
+          : null;
+    const images = normalizeImages(item.images || item.image_list || item.photos);
+    const agentName = cleanText(item.agent_name || item.branch_name || item.company_name);
+    const agentUrl = item.agent_url || item.agentUrl || item.branch_url || null;
+    const tenure = cleanText(item.tenure || item.tenure_type);
+    const floorArea = item.floor_area || item.floor_area_value || item.floor_area_sqft || item.floor_area_sq_m;
+
+    return {
+        listingId: listingId ? String(listingId) : null,
+        url: ensureAbsoluteUrl(url),
+        title: cleanText(item.title || item.heading || item.summary),
+        price,
+        priceValue: parsePriceValue(price),
+        address,
+        streetAddress: null,
+        locality: cleanText(item.town || item.city || item.location || item.post_town),
+        region: cleanText(item.county || item.region),
+        postalCode: cleanText(item.postcode || item.post_code),
+        country: cleanText(item.country),
+        propertyType: cleanText(item.property_type || item.propertyType || item.listing_type),
+        beds: parseNumber(item.num_bedrooms || item.bedrooms || item.beds),
+        baths: parseNumber(item.num_bathrooms || item.bathrooms || item.baths),
+        floorArea: floorArea ? String(floorArea) : null,
+        tenure,
+        description: cleanText(item.description || item.full_description || item.short_description),
+        features: features?.length ? Array.from(new Set(features)) : null,
+        images,
+        agentName,
+        agentUrl: agentUrl ? ensureAbsoluteUrl(agentUrl) : null,
+        latitude: item.latitude || item.lat || null,
+        longitude: item.longitude || item.lng || item.lon || null,
+    };
+};
+
+const extractDetailFromEmbeddedJson = (html) => {
+    const $ = cheerioLoad(html);
+    const nextDataRaw = $('#__NEXT_DATA__').text().trim();
+    if (!nextDataRaw) return null;
+
+    const data = safeParseJson(nextDataRaw);
+    if (!data) return null;
+
+    const stack = [data];
+    const visited = new Set();
+    const candidates = [];
+    let safety = 0;
+
+    while (stack.length && safety < 5000) {
+        safety += 1;
+        const current = stack.pop();
+        if (!current) continue;
+
+        if (Array.isArray(current)) {
+            for (const item of current) stack.push(item);
+            continue;
+        }
+
+        if (typeof current === 'object') {
+            if (visited.has(current)) continue;
+            visited.add(current);
+
+            const score = scoreDetailCandidate(current);
+            if (score >= 3) {
+                candidates.push({ item: current, score });
+            }
+
+            for (const value of Object.values(current)) stack.push(value);
+        }
+    }
+
+    if (!candidates.length) return null;
+
+    candidates.sort((a, b) => b.score - a.score);
+    return normalizeDetailFromObject(candidates[0].item);
+};
+
 const extractListingsFromHtml = (html) => {
     const $ = cheerioLoad(html);
     const listings = [];
@@ -586,58 +714,52 @@ const extractListingsFromHtml = (html) => {
         listings.push(listing);
     }
 
-    $('a[href*="/for-sale/"]').each((_, el) => {
-        const href = $(el).attr('href');
-        if (!href) return;
-        if (!isListingUrl(href)) return;
-        const url = ensureAbsoluteUrl(href);
-        const listingId = extractListingId(url);
-        const key = listingId || url;
-        if (!key || seen.has(key)) return;
-        seen.add(key);
-        listings.push({ url, listingId });
-    });
-
     return listings;
 };
 
 const parseDetailHtml = (html) => {
     const $ = cheerioLoad(html);
     const jsonLdData = parsePropertyFromJsonLd(extractJsonLd(html)) || {};
+    const embeddedDetail = extractDetailFromEmbeddedJson(html) || {};
 
-    const title = jsonLdData.title || getFirstText($, DETAIL_SELECTORS.title);
-    const priceText = jsonLdData.price || getFirstText($, DETAIL_SELECTORS.price);
-    const addressText = jsonLdData.address || getFirstText($, DETAIL_SELECTORS.address);
-
-    const features = jsonLdData.features || getAllText($, DETAIL_SELECTORS.features);
-
-    const images = jsonLdData.images || normalizeImages($('meta[property="og:image"]').attr('content'));
-
-    const agentName = jsonLdData.agentName || getFirstText($, DETAIL_SELECTORS.agentName);
-    const agentUrl = jsonLdData.agentUrl || ensureAbsoluteUrl($(`${DETAIL_SELECTORS.agentUrl.join(', ')}`).first().attr('href'));
+    const title = pickFirst(jsonLdData.title, embeddedDetail.title, getFirstText($, DETAIL_SELECTORS.title));
+    const priceText = pickFirst(jsonLdData.price, embeddedDetail.price, getFirstText($, DETAIL_SELECTORS.price));
+    const addressText = pickFirst(jsonLdData.address, embeddedDetail.address, getFirstText($, DETAIL_SELECTORS.address));
+    const features = pickFirst(jsonLdData.features, embeddedDetail.features, getAllText($, DETAIL_SELECTORS.features));
+    const images = pickFirst(
+        jsonLdData.images,
+        embeddedDetail.images,
+        normalizeImages($('meta[property="og:image"]').attr('content'))
+    );
+    const agentName = pickFirst(jsonLdData.agentName, embeddedDetail.agentName, getFirstText($, DETAIL_SELECTORS.agentName));
+    const agentUrl = pickFirst(
+        jsonLdData.agentUrl,
+        embeddedDetail.agentUrl,
+        ensureAbsoluteUrl($(`${DETAIL_SELECTORS.agentUrl.join(', ')}`).first().attr('href'))
+    );
 
     return {
         title,
         price: priceText,
-        priceCurrency: jsonLdData.priceCurrency || null,
+        priceCurrency: pickFirst(jsonLdData.priceCurrency, embeddedDetail.priceCurrency),
         address: addressText,
-        streetAddress: jsonLdData.streetAddress || null,
-        locality: jsonLdData.locality || null,
-        region: jsonLdData.region || null,
-        postalCode: jsonLdData.postalCode || extractUkPostcode(addressText),
-        country: jsonLdData.country || null,
-        propertyType: jsonLdData.propertyType || getFirstText($, DETAIL_SELECTORS.propertyType),
-        beds: jsonLdData.beds || parseNumber(getFirstText($, DETAIL_SELECTORS.beds)),
-        baths: jsonLdData.baths || parseNumber(getFirstText($, DETAIL_SELECTORS.baths)),
-        floorArea: jsonLdData.floorArea || getFirstText($, DETAIL_SELECTORS.floorArea),
-        tenure: jsonLdData.tenure || getFirstText($, DETAIL_SELECTORS.tenure),
-        description: jsonLdData.description || getFirstText($, DETAIL_SELECTORS.description),
+        streetAddress: pickFirst(jsonLdData.streetAddress, embeddedDetail.streetAddress),
+        locality: pickFirst(jsonLdData.locality, embeddedDetail.locality),
+        region: pickFirst(jsonLdData.region, embeddedDetail.region),
+        postalCode: pickFirst(jsonLdData.postalCode, embeddedDetail.postalCode, extractUkPostcode(addressText)),
+        country: pickFirst(jsonLdData.country, embeddedDetail.country),
+        propertyType: pickFirst(jsonLdData.propertyType, embeddedDetail.propertyType, getFirstText($, DETAIL_SELECTORS.propertyType)),
+        beds: pickFirst(jsonLdData.beds, embeddedDetail.beds, parseNumber(getFirstText($, DETAIL_SELECTORS.beds))),
+        baths: pickFirst(jsonLdData.baths, embeddedDetail.baths, parseNumber(getFirstText($, DETAIL_SELECTORS.baths))),
+        floorArea: pickFirst(jsonLdData.floorArea, embeddedDetail.floorArea, getFirstText($, DETAIL_SELECTORS.floorArea)),
+        tenure: pickFirst(jsonLdData.tenure, embeddedDetail.tenure, getFirstText($, DETAIL_SELECTORS.tenure)),
+        description: pickFirst(jsonLdData.description, embeddedDetail.description, getFirstText($, DETAIL_SELECTORS.description)),
         features,
         images,
         agentName,
         agentUrl,
-        latitude: jsonLdData.latitude || null,
-        longitude: jsonLdData.longitude || null,
+        latitude: pickFirst(jsonLdData.latitude, embeddedDetail.latitude),
+        longitude: pickFirst(jsonLdData.longitude, embeddedDetail.longitude),
     };
 };
 
