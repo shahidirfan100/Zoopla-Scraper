@@ -1,10 +1,15 @@
 /**
- * Zoopla Property Scraper - Production Ready v2.3.0
+ * Zoopla Property Scraper - Production Ready v2.4.0
  * Uses PlaywrightCrawler with Camoufox for Cloudflare bypass
  * 
- * CRITICAL FIX: 
- * - useFingerprints: false to prevent conflict with Camoufox
- * - Don't pass proxy to camoufoxLaunchOptions (let PlaywrightCrawler handle it)
+ * CORRECT SELECTORS (from scrapingdog.com research):
+ * - Card container: div.dkr2t86
+ * - Price: p._64if862
+ * - Address: address.m6hnz62
+ * - Description: p.m6hnz63
+ * - Title: h2.m6hnz61
+ * - Beds: span.num-beds OR data with beds icon
+ * - Baths: span.num-baths OR data with baths icon
  */
 
 import { PlaywrightCrawler } from '@crawlee/playwright';
@@ -51,9 +56,10 @@ const parsePriceValue = (value) => {
 
 const parseNumber = (value) => {
     if (value === null || value === undefined) return null;
-    const numeric = String(value).replace(/[^\d.]/g, '');
-    if (!numeric) return null;
-    return Number(numeric);
+    const text = String(value);
+    // Extract first number from text like "2 beds" or "2"
+    const match = text.match(/(\d+)/);
+    return match ? Number(match[1]) : null;
 };
 
 const extractUkPostcode = (value) => {
@@ -71,7 +77,7 @@ const safeParseJson = (text) => {
 };
 
 // ============================================================================
-// JSON-LD EXTRACTION (PRIMARY METHOD)
+// JSON-LD EXTRACTION (BACKUP - may not always be present)
 // ============================================================================
 const extractListingsFromJsonLd = (html) => {
     const $ = cheerioLoad(html);
@@ -88,7 +94,6 @@ const extractListingsFromJsonLd = (html) => {
         const items = Array.isArray(data) ? data : [data];
 
         for (const item of items) {
-            // ItemList structure
             if (item['@type'] === 'ItemList' && item.itemListElement) {
                 for (const listItem of item.itemListElement) {
                     const property = listItem.item || listItem;
@@ -116,69 +121,6 @@ const extractListingsFromJsonLd = (html) => {
                     });
                 }
             }
-
-            // SearchResultsPage structure
-            if (item['@type'] === 'SearchResultsPage' && item.mainEntity) {
-                const listItems = item.mainEntity.itemListElement || [];
-                for (const listItem of listItems) {
-                    const property = listItem.item || listItem;
-                    const url = ensureAbsoluteUrl(property.url || property['@id']);
-                    const listingId = extractListingId(url);
-                    const key = listingId || url;
-
-                    if (!key || seen.has(key)) continue;
-                    seen.add(key);
-
-                    const addr = property.address || {};
-                    const offers = property.offers || {};
-
-                    listings.push({
-                        listingId,
-                        url,
-                        title: cleanText(property.name),
-                        description: cleanText(property.description),
-                        image: property.image,
-                        address: cleanText(typeof addr === 'string' ? addr : addr.streetAddress),
-                        locality: cleanText(addr.addressLocality),
-                        price: offers.price || null,
-                        priceCurrency: offers.priceCurrency || 'GBP',
-                        source: 'json-ld',
-                    });
-                }
-            }
-
-            // @graph structures
-            if (item['@graph'] && Array.isArray(item['@graph'])) {
-                for (const graphItem of item['@graph']) {
-                    if (graphItem['@type'] === 'ItemList' && graphItem.itemListElement) {
-                        for (const listItem of graphItem.itemListElement) {
-                            const property = listItem.item || listItem;
-                            const url = ensureAbsoluteUrl(property.url || property['@id']);
-                            const listingId = extractListingId(url);
-                            const key = listingId || url;
-
-                            if (!key || seen.has(key)) continue;
-                            seen.add(key);
-
-                            const addr = property.address || {};
-                            const offers = property.offers || {};
-
-                            listings.push({
-                                listingId,
-                                url,
-                                title: cleanText(property.name),
-                                description: cleanText(property.description),
-                                image: property.image,
-                                address: cleanText(typeof addr === 'string' ? addr : addr.streetAddress),
-                                locality: cleanText(addr.addressLocality),
-                                price: offers.price || null,
-                                priceCurrency: offers.priceCurrency || 'GBP',
-                                source: 'json-ld',
-                            });
-                        }
-                    }
-                }
-            }
         }
     });
 
@@ -186,19 +128,28 @@ const extractListingsFromJsonLd = (html) => {
 };
 
 // ============================================================================
-// HTML EXTRACTION (FALLBACK with correct data-testid selectors)
+// HTML EXTRACTION - CORRECT SELECTORS FROM RESEARCH
+// Class names: dkr2t86 (card), _64if862 (price), m6hnz62 (address), m6hnz63 (desc)
 // ============================================================================
 const extractListingsFromHtml = (html) => {
     const $ = cheerioLoad(html);
     const listings = [];
     const seen = new Set();
 
-    // Find all property links
-    $('a[href^="/for-sale/details/"]').each((_, el) => {
-        const href = $(el).attr('href');
+    // CORRECT: Find all listing cards by the container class
+    const cards = $('div.dkr2t86');
 
-        // Skip contact/enquiry links
-        if (href && href.includes('/contact/')) return;
+    log.debug(`Found ${cards.length} listing cards with class dkr2t86`);
+
+    cards.each((_, cardEl) => {
+        const card = $(cardEl);
+
+        // Find the listing URL within the card
+        const linkEl = card.find('a[href^="/for-sale/details/"]').first();
+        const href = linkEl.attr('href');
+
+        // Skip if no valid link or if it's a contact link
+        if (!href || href.includes('/contact/')) return;
 
         const url = ensureAbsoluteUrl(href);
         const listingId = extractListingId(url);
@@ -207,56 +158,69 @@ const extractListingsFromHtml = (html) => {
         if (!key || seen.has(key)) return;
         seen.add(key);
 
-        // Navigate up to find the card container
-        let card = $(el);
-        for (let i = 0; i < 10; i++) {
-            card = card.parent();
-            if (!card.length) break;
+        // CORRECT SELECTORS from scrapingdog research:
+        // Price: p._64if862
+        const priceText = cleanText(card.find('p._64if862').first().text());
 
-            const testId = card.attr('data-testid') || '';
-            if (testId.includes('result') || testId.includes('listing') || card.is('article')) break;
-            if (card.find('[data-testid="listing-price"]').length > 0) break;
+        // Address: address.m6hnz62
+        const address = cleanText(card.find('address.m6hnz62').first().text());
+
+        // Description/Title: p.m6hnz63 or h2.m6hnz61
+        const description = cleanText(card.find('p.m6hnz63').first().text());
+        const title = cleanText(
+            card.find('h2.m6hnz61').first().text() ||
+            card.find('h2').first().text() ||
+            description
+        );
+
+        // Beds and Baths - look for various patterns
+        // Pattern 1: span.num-beds, span.num-baths
+        let beds = parseNumber(card.find('span.num-beds').first().text());
+        let baths = parseNumber(card.find('span.num-baths').first().text());
+
+        // Pattern 2: Look for elements with bed/bath icons or text
+        if (!beds) {
+            // Try finding text that contains "bed"
+            card.find('span, p, div').each((_, el) => {
+                const text = $(el).text().toLowerCase();
+                if (!beds && text.includes('bed') && !text.includes('bath')) {
+                    const match = text.match(/(\d+)\s*bed/i);
+                    if (match) beds = Number(match[1]);
+                }
+                if (!baths && text.includes('bath')) {
+                    const match = text.match(/(\d+)\s*bath/i);
+                    if (match) baths = Number(match[1]);
+                }
+            });
         }
 
-        // Extract using data-testid selectors
-        const title = cleanText(
-            card.find('[data-testid="listing-title"]').first().text() ||
-            card.find('h2').first().text() ||
-            card.find('h3').first().text()
-        );
+        // Pattern 3: data-testid attributes
+        if (!beds) {
+            beds = parseNumber(card.find('[data-testid="bed"]').first().text());
+        }
+        if (!baths) {
+            baths = parseNumber(card.find('[data-testid="bath"]').first().text());
+        }
 
-        const priceText = cleanText(
-            card.find('[data-testid="listing-price"]').first().text() ||
-            card.find('[data-testid="price"]').first().text()
-        );
+        // Property type from description or dedicated element
+        let propertyType = null;
+        if (title) {
+            const typeMatch = title.match(/\d+\s*bed\s+(\w+)/i);
+            if (typeMatch) {
+                propertyType = cleanText(typeMatch[1]);
+            }
+        }
 
-        const address = cleanText(
-            card.find('[data-testid="listing-address"]').first().text() ||
-            card.find('address').first().text()
-        );
-
-        const beds = parseNumber(
-            card.find('[data-testid="bed"]').first().text() ||
-            card.find('[data-testid="beds"]').first().text()
-        );
-
-        const baths = parseNumber(
-            card.find('[data-testid="bath"]').first().text() ||
-            card.find('[data-testid="baths"]').first().text()
-        );
-
+        // Image
         const image = ensureAbsoluteUrl(
-            card.find('[data-testid="listing-photo"]').first().attr('src') ||
-            card.find('img').first().attr('src')
+            card.find('img').first().attr('src') ||
+            card.find('picture source').first().attr('srcset')?.split(',')[0]?.trim()?.split(' ')[0]
         );
 
-        const description = cleanText(
-            card.find('[data-testid="listing-description"]').first().text()
-        );
-
+        // Agent name
         const agentName = cleanText(
-            card.find('[data-testid="listing-agent"]').first().text() ||
-            card.find('[data-testid="agent-name"]').first().text()
+            card.find('[data-testid="agent-name"]').first().text() ||
+            card.find('.agent-name').first().text()
         );
 
         listings.push({
@@ -269,13 +233,67 @@ const extractListingsFromHtml = (html) => {
             postalCode: extractUkPostcode(address),
             beds,
             baths,
-            image,
+            propertyType,
             description,
+            image,
             agentName,
             priceCurrency: 'GBP',
             source: 'html',
         });
     });
+
+    // FALLBACK: If no cards found with div.dkr2t86, try finding links directly
+    if (listings.length === 0) {
+        log.debug('No div.dkr2t86 cards found, falling back to link-based extraction');
+
+        $('a[href^="/for-sale/details/"]').each((_, el) => {
+            const href = $(el).attr('href');
+            if (!href || href.includes('/contact/')) return;
+
+            const url = ensureAbsoluteUrl(href);
+            const listingId = extractListingId(url);
+            const key = listingId || url;
+
+            if (!key || seen.has(key)) return;
+            seen.add(key);
+
+            // Try to find parent container
+            let card = $(el);
+            for (let i = 0; i < 8; i++) {
+                card = card.parent();
+                if (!card.length) break;
+            }
+
+            // Extract what we can
+            const priceText = cleanText(
+                card.find('p._64if862').first().text() ||
+                card.find('[data-testid="listing-price"]').first().text()
+            );
+
+            const address = cleanText(
+                card.find('address.m6hnz62').first().text() ||
+                card.find('address').first().text()
+            );
+
+            listings.push({
+                listingId,
+                url,
+                title: null,
+                price: parsePriceValue(priceText),
+                priceText,
+                address,
+                postalCode: extractUkPostcode(address),
+                beds: null,
+                baths: null,
+                propertyType: null,
+                description: null,
+                image: null,
+                agentName: null,
+                priceCurrency: 'GBP',
+                source: 'html-fallback',
+            });
+        });
+    }
 
     return listings;
 };
@@ -331,7 +349,6 @@ await Actor.init();
 try {
     const input = (await Actor.getInput()) || {};
 
-    // Input validation
     const startUrls = Array.isArray(input.startUrls) && input.startUrls.length ? input.startUrls : null;
     const startUrl = input.startUrl || (startUrls ? null : DEFAULT_START_URL);
 
@@ -344,10 +361,9 @@ try {
 
     const resultsWanted = Math.max(1, Number.isFinite(+input.results_wanted) ? +input.results_wanted : 50);
     const maxPages = Math.max(1, Number.isFinite(+input.max_pages) ? +input.max_pages : 5);
-    // CRITICAL: Use only 1 concurrent browser to avoid detection
-    const maxConcurrency = 1;
+    const maxConcurrency = 1; // Single concurrency for stealth
 
-    // Proxy configuration - UK residential proxies required
+    // Proxy configuration
     const proxyConfiguration = await Actor.createProxyConfiguration({
         useApifyProxy: true,
         apifyProxyGroups: ['RESIDENTIAL'],
@@ -355,24 +371,17 @@ try {
         ...input.proxyConfiguration,
     });
 
-    log.info('Zoopla Scraper Starting', {
+    log.info('Zoopla Scraper Starting v2.4.0', {
         targets: startUrls?.length || 1,
         resultsWanted,
         maxPages,
         maxConcurrency,
-        usingCamoufox: true,
     });
 
-    // State management
     const seen = new Set();
-    const stats = {
-        pagesProcessed: 0,
-        listingsSaved: 0,
-        methodsUsed: new Set(),
-    };
+    const stats = { pagesProcessed: 0, listingsSaved: 0, methodsUsed: new Set() };
     let saved = 0;
 
-    // Build initial request queue
     const targets = startUrls || [startUrl];
     const initialRequests = [];
 
@@ -385,105 +394,74 @@ try {
         }
     }
 
-    // Get Camoufox launch options
-    // CRITICAL: Do NOT pass proxy here - let PlaywrightCrawler handle it
     const camoufoxOptions = await camoufoxLaunchOptions({
         headless: true,
-        // geoip: true will use the proxy to determine location
         geoip: true,
-        // DO NOT pass proxy here - it causes NS_ERROR_PROXY_CONNECTION_REFUSED
-        // proxy: REMOVED - PlaywrightCrawler manages proxy via proxyConfiguration
     });
 
-    log.info('Camoufox options configured', {
-        headless: true,
-        geoip: true,
-        proxyHandledBy: 'PlaywrightCrawler'
-    });
-
-    // Create PlaywrightCrawler with Camoufox
     const crawler = new PlaywrightCrawler({
-        // Proxy is handled here, NOT in camoufoxLaunchOptions
         proxyConfiguration,
         maxConcurrency,
         maxRequestRetries: 5,
         requestHandlerTimeoutSecs: 120,
         navigationTimeoutSecs: 90,
 
-        // Camoufox launch configuration
         launchContext: {
             launcher: firefox,
             launchOptions: camoufoxOptions,
         },
 
-        // CRITICAL: Disable Crawlee's fingerprinting - Camoufox handles it
         browserPoolOptions: {
-            useFingerprints: false,  // <-- REQUIRED for Camoufox
+            useFingerprints: false,
             maxOpenPagesPerBrowser: 1,
             retireBrowserAfterPageCount: 2,
         },
 
-        // Pre-navigation for human-like behavior
         preNavigationHooks: [
             async ({ page }) => {
-                // Random delay before navigation (2-5 seconds)
-                const delay = 2000 + Math.random() * 3000;
-                log.debug(`Pre-navigation delay: ${Math.round(delay)}ms`);
-                await sleep(delay);
+                await sleep(2000 + Math.random() * 3000);
             },
         ],
 
-        // Post-navigation for page interaction
         postNavigationHooks: [
             async ({ page }) => {
-                // Wait for page to stabilize
                 await page.waitForLoadState('domcontentloaded');
                 await sleep(2000 + Math.random() * 1000);
 
-                // Human-like scrolling
-                await page.evaluate(() => window.scrollBy(0, 300));
+                // Scroll to load all content
+                await page.evaluate(() => window.scrollBy(0, 500));
+                await sleep(500);
+                await page.evaluate(() => window.scrollBy(0, 800));
                 await sleep(500);
                 await page.evaluate(() => window.scrollBy(0, 500));
                 await sleep(1000);
-                await page.evaluate(() => window.scrollBy(0, 300));
-                await sleep(500);
             },
         ],
 
-        // Main request handler
         async requestHandler({ request, page }) {
             const { type, page: pageNum } = request.userData;
 
-            if (saved >= resultsWanted) {
-                log.debug('Results limit reached, skipping');
-                return;
-            }
+            if (saved >= resultsWanted) return;
 
-            // Check for Cloudflare challenge
+            // Check for Cloudflare
             const pageContent = await page.content();
-            if (pageContent.includes('Just a moment') ||
-                pageContent.includes('Verify you are human') ||
-                pageContent.includes('Checking your browser')) {
-                log.warning(`Cloudflare challenge detected on page ${pageNum}, waiting for resolution...`);
-
-                // Wait for challenge to resolve
+            if (pageContent.includes('Just a moment') || pageContent.includes('Verify you are human')) {
+                log.warning(`Cloudflare challenge on page ${pageNum}, waiting...`);
                 await sleep(8000);
                 await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
-
-                // Check again after waiting
-                const newContent = await page.content();
-                if (newContent.includes('Just a moment') || newContent.includes('Verify you are human')) {
-                    log.error(`Cloudflare challenge not resolved on page ${pageNum}`);
-                    return;
-                }
             }
 
             if (type === 'search') {
                 log.info(`Processing search page ${pageNum}: ${request.url}`);
 
+                // Wait for content to render
+                await page.waitForSelector('div.dkr2t86', { timeout: 15000 }).catch(() => {
+                    log.debug('div.dkr2t86 not found, trying alternatives');
+                });
+
                 const html = await page.content();
 
-                // Dual extraction: JSON-LD + HTML
+                // Extract using both methods
                 const jsonLdListings = extractListingsFromJsonLd(html);
                 const htmlListings = extractListingsFromHtml(html);
                 const listings = mergeListings(jsonLdListings, htmlListings);
@@ -494,18 +472,15 @@ try {
                 log.info(`Found ${listings.length} listings on page ${pageNum} (JSON-LD: ${jsonLdListings.length}, HTML: ${htmlListings.length})`);
 
                 if (!listings.length) {
-                    log.warning(`No listings found on page ${pageNum} - may be blocked`);
-
-                    // Save debug info
+                    log.warning(`No listings on page ${pageNum}`);
+                    // Debug: Save page content for analysis
                     const title = await page.title();
                     log.debug(`Page title: ${title}`);
-
                     return;
                 }
 
                 stats.pagesProcessed++;
 
-                // Process listings
                 for (const listing of listings) {
                     if (saved >= resultsWanted) break;
 
@@ -545,37 +520,24 @@ try {
             }
         },
 
-        // Error handling
         async failedRequestHandler({ request, error }) {
-            log.error(`Request failed: ${request.url}`, {
-                error: error.message,
-                retryCount: request.retryCount
-            });
+            log.error(`Failed: ${request.url}`, { error: error.message });
         },
     });
 
-    // Run crawler
     await crawler.run(initialRequests);
 
-    // Final status
     if (saved === 0) {
-        const message = 'No listings scraped. Zoopla may be blocking all requests. Try again later.';
-        log.warning(message);
-        await Actor.setStatusMessage(message);
+        await Actor.setStatusMessage('No listings scraped. Check logs.');
     } else {
-        const summary = {
-            listingsSaved: saved,
-            pagesProcessed: stats.pagesProcessed,
-            methodsUsed: Array.from(stats.methodsUsed),
-        };
-        log.info('Scraping complete!', summary);
-        await Actor.setStatusMessage(`Successfully scraped ${saved} listings`);
-        await Actor.setValue('RUN_SUMMARY', summary);
+        log.info('Complete!', { saved, pages: stats.pagesProcessed, methods: Array.from(stats.methodsUsed) });
+        await Actor.setStatusMessage(`Scraped ${saved} listings`);
+        await Actor.setValue('RUN_SUMMARY', { saved, pages: stats.pagesProcessed });
     }
 
 } catch (error) {
-    log.error(`Actor failed: ${error.message}`, { stack: error.stack });
-    await Actor.setStatusMessage(`Failed: ${error.message}`);
+    log.error(`Error: ${error.message}`, { stack: error.stack });
+    await Actor.setStatusMessage(`Error: ${error.message}`);
     throw error;
 } finally {
     await Actor.exit();
