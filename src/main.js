@@ -1,18 +1,11 @@
 /**
- * Zoopla Property Scraper - Production Ready v3.0.0
+ * Zoopla Property Scraper - Production Ready v3.1.0
  * 
- * OPTIMIZED FOR SPEED & COST:
- * - Reduced delays (1-2s instead of 2-5s)
- * - Block unnecessary resources (images, CSS, fonts)
- * - Faster scrolling
- * - Minimal waits
- * 
- * SELECTORS:
- * - Listing container: div[id^="listing_"]
- * - Price: p[class*="price_priceText"]
- * - Address: address[class*="summary_address"]
- * - Description: p[class*="summary_summary"]
- * - Amenities: p[class*="amenities_amenityList"]
+ * BALANCED SPEED + STEALTH:
+ * - Only block analytics/tracking (NOT CSS/fonts - affects fingerprint!)
+ * - Moderate delays (1.5-2.5s) - fast but safe
+ * - Batch data saves
+ * - Quick scrolling
  */
 
 import { PlaywrightCrawler } from '@crawlee/playwright';
@@ -31,19 +24,20 @@ const MAX_CONCURRENCY = 1;
 
 const PROPERTY_TYPES = ['flat', 'apartment', 'house', 'maisonette', 'bungalow', 'studio', 'duplex', 'penthouse', 'townhouse', 'land', 'detached', 'semi-detached', 'terraced', 'cottage'];
 
-// Resources to block for speed
-const BLOCKED_RESOURCES = ['image', 'media', 'font', 'stylesheet'];
+// Only block tracking - NOT CSS/fonts (they affect fingerprint!)
 const BLOCKED_URLS = [
     'google-analytics.com',
     'googletagmanager.com',
+    'facebook.net',
     'facebook.com',
     'doubleclick.net',
     'hotjar.com',
     'newrelic.com',
-    'optimizely.com',
     'segment.com',
     'amplitude.com',
     'mixpanel.com',
+    'clarity.ms',
+    'bing.com/bat',
 ];
 
 // ============================================================================
@@ -85,14 +79,6 @@ const extractUkPostcode = (value) => {
         const match = text.match(pattern);
         if (match) return match[1].toUpperCase();
     }
-    const parts = text.split(',');
-    if (parts.length > 1) {
-        const lastPart = parts[parts.length - 1].trim();
-        for (const pattern of patterns) {
-            const match = lastPart.match(pattern);
-            if (match) return match[1].toUpperCase();
-        }
-    }
     return null;
 };
 
@@ -108,7 +94,7 @@ const extractPropertyType = (text) => {
 };
 
 // ============================================================================
-// HTML EXTRACTION (Optimized - minimal operations)
+// HTML EXTRACTION
 // ============================================================================
 const extractListingsFromHtml = (html) => {
     const $ = cheerioLoad(html);
@@ -129,7 +115,6 @@ const extractListingsFromHtml = (html) => {
         const href = linkEl.attr('href');
         const url = ensureAbsoluteUrl(href) || `${BASE_URL}/for-sale/details/${listingId}/`;
 
-        // Price
         let priceText = cleanText(card.find('p[class*="price_priceText"]').first().text());
         if (!priceText) {
             card.find('p').each((_, el) => {
@@ -141,24 +126,20 @@ const extractListingsFromHtml = (html) => {
             });
         }
 
-        // Address
         const address = cleanText(
             card.find('address[class*="summary_address"]').first().text() ||
             card.find('address').first().text()
         );
 
-        // Description
         const description = cleanText(
             card.find('p[class*="summary_summary"]').first().text()
         );
 
-        // Amenities
-        let amenitiesText = cleanText(
+        const amenitiesText = cleanText(
             card.find('p[class*="amenities_amenityList"]').first().text() ||
             card.find('p[class*="amenities"]').first().text()
         );
 
-        // Parse beds, baths
         let beds = null, baths = null, receptions = null;
         const cardText = card.text();
 
@@ -170,12 +151,10 @@ const extractListingsFromHtml = (html) => {
         if (bathsMatch) baths = Number(bathsMatch[1]);
         if (receptionsMatch) receptions = Number(receptionsMatch[1]);
 
-        // Property type
         const propertyType = extractPropertyType(description) ||
             extractPropertyType(amenitiesText) ||
             extractPropertyType(cardText);
 
-        // Title
         let title = null;
         if (beds && propertyType) {
             title = `${beds} bed ${propertyType} for sale`;
@@ -185,7 +164,6 @@ const extractListingsFromHtml = (html) => {
             title = address;
         }
 
-        // Image URL (from srcset or src)
         let image = null;
         const imgEl = card.find('img').first();
         const imgSrc = imgEl.attr('src') || imgEl.attr('data-src');
@@ -193,7 +171,6 @@ const extractListingsFromHtml = (html) => {
             image = ensureAbsoluteUrl(imgSrc.split('?')[0]);
         }
 
-        // Agent name
         let agentName = null;
         const agentImg = card.find('img[alt*="Estate Agent"], img[alt*="logo"]').first();
         if (agentImg.length) {
@@ -261,11 +238,7 @@ try {
         ...input.proxyConfiguration,
     });
 
-    log.info('Zoopla Scraper v3.0.0 (Optimized)', {
-        resultsWanted,
-        maxPages,
-        mode: 'FAST',
-    });
+    log.info('Zoopla Scraper v3.1.0 (Balanced)', { resultsWanted, maxPages });
 
     const seen = new Set();
     let saved = 0;
@@ -288,8 +261,8 @@ try {
         proxyConfiguration,
         maxConcurrency: MAX_CONCURRENCY,
         maxRequestRetries: 3,
-        requestHandlerTimeoutSecs: 60,
-        navigationTimeoutSecs: 45,
+        requestHandlerTimeoutSecs: 90,
+        navigationTimeoutSecs: 60,
 
         launchContext: {
             launcher: firefox,
@@ -302,24 +275,16 @@ try {
             retireBrowserAfterPageCount: 3,
         },
 
-        // Block unnecessary resources for speed
         preNavigationHooks: [
             async ({ page }) => {
-                // FAST: Minimal delay (just enough to not trigger rate limits)
-                await sleep(1000 + Math.random() * 1000);
+                // Moderate delay (balanced: fast but safe)
+                await sleep(1500 + Math.random() * 1000);
 
-                // Block resources for speed
+                // Only block tracking/analytics - NOT images/CSS/fonts
                 await page.route('**/*', (route) => {
-                    const request = route.request();
-                    const resourceType = request.resourceType();
-                    const url = request.url();
+                    const url = route.request().url();
 
-                    // Block heavy resources
-                    if (BLOCKED_RESOURCES.includes(resourceType)) {
-                        return route.abort();
-                    }
-
-                    // Block tracking/analytics
+                    // Block only tracking/analytics
                     if (BLOCKED_URLS.some(blocked => url.includes(blocked))) {
                         return route.abort();
                     }
@@ -331,18 +296,15 @@ try {
 
         postNavigationHooks: [
             async ({ page }) => {
-                // FAST: Minimal wait for DOM
                 await page.waitForLoadState('domcontentloaded');
 
-                // Quick scroll to trigger lazy loading
+                // Quick scroll
                 await page.evaluate(() => {
-                    window.scrollTo(0, 1000);
-                    window.scrollTo(0, 2000);
-                    window.scrollTo(0, 0);
+                    window.scrollTo(0, 800);
+                    window.scrollTo(0, 1600);
                 });
 
-                // Short wait for content
-                await sleep(500);
+                await sleep(800);
             },
         ],
 
@@ -350,17 +312,16 @@ try {
             const { page: pageNum } = request.userData;
 
             if (saved >= resultsWanted) {
-                log.debug(`Skipping page ${pageNum}`);
+                log.debug(`Skip page ${pageNum}`);
                 return;
             }
 
             const pageContent = await page.content();
 
-            // Cloudflare check
             if (pageContent.includes('Just a moment') || pageContent.includes('Verify you are human')) {
                 log.warning(`Cloudflare on page ${pageNum}, waiting...`);
-                await sleep(5000);
-                await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => { });
+                await sleep(6000);
+                await page.waitForLoadState('networkidle', { timeout: 25000 }).catch(() => { });
             }
 
             log.info(`Page ${pageNum}/${maxPages}`);
@@ -372,7 +333,6 @@ try {
 
             if (!listings.length) return;
 
-            // Batch push for speed
             const toSave = [];
             for (const listing of listings) {
                 if (saved >= resultsWanted) break;
@@ -389,7 +349,6 @@ try {
                 saved++;
             }
 
-            // Push all at once (faster than one by one)
             if (toSave.length) {
                 await Dataset.pushData(toSave);
                 log.info(`Saved ${saved}/${resultsWanted}`);
