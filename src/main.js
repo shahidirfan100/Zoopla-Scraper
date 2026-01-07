@@ -1,11 +1,10 @@
 /**
- * Zoopla Property Scraper - Production Ready v3.1.0
+ * Zoopla Property Scraper - Production Ready v3.2.0
  * 
- * BALANCED SPEED + STEALTH:
- * - Only block analytics/tracking (NOT CSS/fonts - affects fingerprint!)
- * - Moderate delays (1.5-2.5s) - fast but safe
- * - Batch data saves
- * - Quick scrolling
+ * REVERTS aggressive optimizations that caused blocks:
+ * - NO page.route() blocking (triggers detection!)
+ * - Moderate delays for stealth
+ * - KEEPS: Batch saves, auto max_pages calculation
  */
 
 import { PlaywrightCrawler } from '@crawlee/playwright';
@@ -23,22 +22,6 @@ const LISTINGS_PER_PAGE = 28;
 const MAX_CONCURRENCY = 1;
 
 const PROPERTY_TYPES = ['flat', 'apartment', 'house', 'maisonette', 'bungalow', 'studio', 'duplex', 'penthouse', 'townhouse', 'land', 'detached', 'semi-detached', 'terraced', 'cottage'];
-
-// Only block tracking - NOT CSS/fonts (they affect fingerprint!)
-const BLOCKED_URLS = [
-    'google-analytics.com',
-    'googletagmanager.com',
-    'facebook.net',
-    'facebook.com',
-    'doubleclick.net',
-    'hotjar.com',
-    'newrelic.com',
-    'segment.com',
-    'amplitude.com',
-    'mixpanel.com',
-    'clarity.ms',
-    'bing.com/bat',
-];
 
 // ============================================================================
 // UTILITY FUNCTIONS
@@ -238,7 +221,7 @@ try {
         ...input.proxyConfiguration,
     });
 
-    log.info('Zoopla Scraper v3.1.0 (Balanced)', { resultsWanted, maxPages });
+    log.info('Zoopla Scraper v3.2.0', { resultsWanted, maxPages });
 
     const seen = new Set();
     let saved = 0;
@@ -261,8 +244,8 @@ try {
         proxyConfiguration,
         maxConcurrency: MAX_CONCURRENCY,
         maxRequestRetries: 3,
-        requestHandlerTimeoutSecs: 90,
-        navigationTimeoutSecs: 60,
+        requestHandlerTimeoutSecs: 120,
+        navigationTimeoutSecs: 90,
 
         launchContext: {
             launcher: firefox,
@@ -272,39 +255,31 @@ try {
         browserPoolOptions: {
             useFingerprints: false,
             maxOpenPagesPerBrowser: 1,
-            retireBrowserAfterPageCount: 3,
+            retireBrowserAfterPageCount: 2,
         },
 
+        // NO page.route() blocking - it triggers detection!
         preNavigationHooks: [
-            async ({ page }) => {
-                // Moderate delay (balanced: fast but safe)
-                await sleep(1500 + Math.random() * 1000);
-
-                // Only block tracking/analytics - NOT images/CSS/fonts
-                await page.route('**/*', (route) => {
-                    const url = route.request().url();
-
-                    // Block only tracking/analytics
-                    if (BLOCKED_URLS.some(blocked => url.includes(blocked))) {
-                        return route.abort();
-                    }
-
-                    return route.continue();
-                });
+            async () => {
+                // Moderate delay for stealth
+                await sleep(2000 + Math.random() * 2000);
             },
         ],
 
         postNavigationHooks: [
             async ({ page }) => {
                 await page.waitForLoadState('domcontentloaded');
+                await sleep(1500);
 
-                // Quick scroll
-                await page.evaluate(() => {
-                    window.scrollTo(0, 800);
-                    window.scrollTo(0, 1600);
-                });
+                // Wait for listings
+                await page.waitForSelector('div[id^="listing_"]', { timeout: 15000 }).catch(() => { });
 
-                await sleep(800);
+                // Scroll to load content
+                for (let i = 0; i < 4; i++) {
+                    await page.evaluate(() => window.scrollBy(0, 500));
+                    await sleep(300);
+                }
+                await sleep(500);
             },
         ],
 
@@ -320,8 +295,8 @@ try {
 
             if (pageContent.includes('Just a moment') || pageContent.includes('Verify you are human')) {
                 log.warning(`Cloudflare on page ${pageNum}, waiting...`);
-                await sleep(6000);
-                await page.waitForLoadState('networkidle', { timeout: 25000 }).catch(() => { });
+                await sleep(8000);
+                await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
             }
 
             log.info(`Page ${pageNum}/${maxPages}`);
@@ -333,6 +308,7 @@ try {
 
             if (!listings.length) return;
 
+            // Batch save for efficiency
             const toSave = [];
             for (const listing of listings) {
                 if (saved >= resultsWanted) break;
