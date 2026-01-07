@@ -1,0 +1,116 @@
+{
+  "title": "Zoopla Property Scraper",
+  "description": "JSON-first Zoopla scraper with HTML and sitemap fallbacks. Supports pagination, detail extraction, and proxy configuration.",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "startUrl": {
+      "title": "Primary Zoopla search URL",
+      "type": "string",
+      "description": "Single Zoopla search URL (for-sale).",
+      "editor": "textfield",
+      "example": "https://www.zoopla.co.uk/for-sale/property/london/?q=London&search_source=home&recent_search=true",
+      "default": "https://www.zoopla.co.uk/for-sale/property/london/?q=London&search_source=home&recent_search=true",
+      "prefill": "https://www.zoopla.co.uk/for-sale/property/london/?q=London&search_source=home&recent_search=true"
+    },
+    "startUrls": {
+      "title": "Multiple search URLs",
+      "type": "array",
+      "description": "Optional list of Zoopla search URLs to crawl.",
+      "editor": "stringList",
+      "example": [
+        "https://www.zoopla.co.uk/for-sale/property/london/?q=London&search_source=home&recent_search=true"
+      ]
+    },
+    "results_wanted": {
+      "title": "Maximum listings to extract",
+      "type": "integer",
+      "description": "Maximum number of property listings to collect (1-1000).",
+      "minimum": 1,
+      "maximum": 1000,
+      "default": 50,
+      "prefill": 50,
+      "editor": "number"
+    },
+    "max_pages": {
+      "title": "Maximum pages",
+      "type": "integer",
+      "description": "Maximum number of search pages to process per URL.",
+      "minimum": 1,
+      "maximum": 20,
+      "editor": "number",
+      "default": 3,
+      "prefill": 3
+    },
+    "pageSize": {
+      "title": "API page size",
+      "type": "integer",
+      "description": "Preferred page size for JSON API requests (when supported).",
+      "minimum": 5,
+      "maximum": 100,
+      "editor": "number",
+      "default": 25,
+      "prefill": 25
+    },
+    "collectDetails": {
+      "title": "Collect full property details",
+      "type": "boolean",
+      "description": "Visit each property detail page to extract descriptions, images, and structured data.",
+      "editor": "checkbox",
+      "default": true,
+      "prefill": true
+    },
+    "maxConcurrency": {
+      "title": "Max concurrency",
+      "type": "integer",
+      "description": "Maximum concurrent requests (2-5 recommended).",
+      "minimum": 1,
+      "maximum": 10,
+      "default": 3,
+      "prefill": 3,
+      "editor": "number"
+    },
+    "useJsonApi": {
+      "title": "Use JSON API first",
+      "type": "boolean",
+      "description": "Attempt JSON API endpoints before HTML scraping.",
+      "editor": "checkbox",
+      "default": true,
+      "prefill": true
+    },
+    "useHtmlFallback": {
+      "title": "Use HTML fallback",
+      "type": "boolean",
+      "description": "Fallback to HTML parsing when API results are not available.",
+      "editor": "checkbox",
+      "default": true,
+      "prefill": true
+    },
+    "useSitemap": {
+      "title": "Use sitemap fallback",
+      "type": "boolean",
+      "description": "Try sitemap discovery if API and HTML results are insufficient.",
+      "editor": "checkbox",
+      "default": true,
+      "prefill": true
+    },
+    "proxyConfiguration": {
+      "title": "Proxy configuration",
+      "type": "object",
+      "description": "Recommended: use Apify Proxy for reliability.",
+      "editor": "proxy",
+      "default": {
+        "useApifyProxy": true,
+        "apifyProxyGroups": [
+          "RESIDENTIAL"
+        ]
+      },
+      "prefill": {
+        "useApifyProxy": true,
+        "apifyProxyGroups": [
+          "RESIDENTIAL"
+        ]
+      }
+    }
+  }
+}

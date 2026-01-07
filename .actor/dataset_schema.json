@@ -1,0 +1,68 @@
+{
+  "actorSpecification": 1,
+  "fields": {},
+  "views": {
+    "overview": {
+      "title": "Overview",
+      "transformation": {
+        "fields": [
+          "listingId",
+          "title",
+          "address",
+          "locality",
+          "postalCode",
+          "price",
+          "beds",
+          "baths",
+          "propertyType",
+          "url"
+        ]
+      },
+      "display": {
+        "component": "table",
+        "properties": {
+          "listingId": {
+            "label": "Listing ID",
+            "format": "text"
+          },
+          "title": {
+            "label": "Title",
+            "format": "text"
+          },
+          "address": {
+            "label": "Address",
+            "format": "text"
+          },
+          "locality": {
+            "label": "Locality",
+            "format": "text"
+          },
+          "postalCode": {
+            "label": "Postcode",
+            "format": "text"
+          },
+          "price": {
+            "label": "Price",
+            "format": "text"
+          },
+          "beds": {
+            "label": "Beds",
+            "format": "text"
+          },
+          "baths": {
+            "label": "Baths",
+            "format": "text"
+          },
+          "propertyType": {
+            "label": "Type",
+            "format": "text"
+          },
+          "url": {
+            "label": "URL",
+            "format": "link"
+          }
+        }
+      }
+    }
+  }
+}
