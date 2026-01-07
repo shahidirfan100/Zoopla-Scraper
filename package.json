@@ -1,6 +1,6 @@
 {
   "name": "zoopla-property-scraper",
-  "version": "2.4.0",
+  "version": "2.6.0",
   "description": "Stealthy Zoopla property scraper using PlaywrightCrawler with Camoufox for Cloudflare bypass",
   "type": "module",
   "dependencies": {

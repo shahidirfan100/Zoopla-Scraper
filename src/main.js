@@ -1,15 +1,16 @@
 /**
- * Zoopla Property Scraper - Production Ready v2.4.0
- * Uses PlaywrightCrawler with Camoufox for Cloudflare bypass
+ * Zoopla Property Scraper - Production Ready v2.6.0
  * 
- * CORRECT SELECTORS (from scrapingdog.com research):
- * - Card container: div.dkr2t86
- * - Price: p._64if862
- * - Address: address.m6hnz62
- * - Description: p.m6hnz63
- * - Title: h2.m6hnz61
- * - Beds: span.num-beds OR data with beds icon
- * - Baths: span.num-baths OR data with baths icon
+ * CORRECT SELECTORS (from live browser inspection):
+ * - Listing container: div[id^="listing_"] (e.g., div#listing_71962539)
+ * - Also has class: dkr2t86
+ * - Price: p[class*="price_priceText"]
+ * - Address: address[class*="summary_address"]
+ * - Description: p[class*="summary_summary"]
+ * - Amenities (beds/baths): p[class*="amenities_amenityList"] → "1 bed 1 bath 1 reception"
+ * - Link: a[href*="/for-sale/details/"]
+ * 
+ * NOTE: __NEXT_DATA__ does NOT exist on search pages
  */
 
 import { PlaywrightCrawler } from '@crawlee/playwright';
@@ -47,19 +48,17 @@ const extractListingId = (url) => {
     return match ? match[1] : null;
 };
 
+const extractListingIdFromDivId = (divId) => {
+    if (!divId) return null;
+    const match = divId.match(/listing_(\d+)/);
+    return match ? match[1] : null;
+};
+
 const parsePriceValue = (value) => {
     if (typeof value === 'number') return value;
     if (!value) return null;
     const numeric = String(value).replace(/[^\d.]/g, '');
     return numeric ? Number(numeric) : null;
-};
-
-const parseNumber = (value) => {
-    if (value === null || value === undefined) return null;
-    const text = String(value);
-    // Extract first number from text like "2 beds" or "2"
-    const match = text.match(/(\d+)/);
-    return match ? Number(match[1]) : null;
 };
 
 const extractUkPostcode = (value) => {
@@ -68,159 +67,125 @@ const extractUkPostcode = (value) => {
     return match ? match[0].toUpperCase() : null;
 };
 
-const safeParseJson = (text) => {
-    try {
-        return JSON.parse(text);
-    } catch {
-        return null;
-    }
-};
-
 // ============================================================================
-// JSON-LD EXTRACTION (BACKUP - may not always be present)
-// ============================================================================
-const extractListingsFromJsonLd = (html) => {
-    const $ = cheerioLoad(html);
-    const listings = [];
-    const seen = new Set();
-
-    $('script[type="application/ld+json"]').each((_, el) => {
-        const raw = $(el).html();
-        if (!raw) return;
-
-        const data = safeParseJson(raw);
-        if (!data) return;
-
-        const items = Array.isArray(data) ? data : [data];
-
-        for (const item of items) {
-            if (item['@type'] === 'ItemList' && item.itemListElement) {
-                for (const listItem of item.itemListElement) {
-                    const property = listItem.item || listItem;
-                    const url = ensureAbsoluteUrl(property.url || property['@id']);
-                    const listingId = extractListingId(url);
-                    const key = listingId || url;
-
-                    if (!key || seen.has(key)) continue;
-                    seen.add(key);
-
-                    const addr = property.address || {};
-                    const offers = property.offers || {};
-
-                    listings.push({
-                        listingId,
-                        url,
-                        title: cleanText(property.name),
-                        description: cleanText(property.description),
-                        image: property.image,
-                        address: cleanText(typeof addr === 'string' ? addr : addr.streetAddress),
-                        locality: cleanText(addr.addressLocality),
-                        price: offers.price || null,
-                        priceCurrency: offers.priceCurrency || 'GBP',
-                        source: 'json-ld',
-                    });
-                }
-            }
-        }
-    });
-
-    return listings;
-};
-
-// ============================================================================
-// HTML EXTRACTION - CORRECT SELECTORS FROM RESEARCH
-// Class names: dkr2t86 (card), _64if862 (price), m6hnz62 (address), m6hnz63 (desc)
+// HTML EXTRACTION - CORRECT SELECTORS FROM BROWSER INSPECTION
 // ============================================================================
 const extractListingsFromHtml = (html) => {
     const $ = cheerioLoad(html);
     const listings = [];
     const seen = new Set();
 
-    // CORRECT: Find all listing cards by the container class
-    const cards = $('div.dkr2t86');
+    // CORRECT SELECTOR: div[id^="listing_"] - each listing has id like "listing_71962539"
+    const cards = $('div[id^="listing_"]');
 
-    log.debug(`Found ${cards.length} listing cards with class dkr2t86`);
+    log.info(`Found ${cards.length} listing cards with div[id^="listing_"]`);
 
     cards.each((_, cardEl) => {
         const card = $(cardEl);
+        const divId = card.attr('id');
 
-        // Find the listing URL within the card
-        const linkEl = card.find('a[href^="/for-sale/details/"]').first();
+        // Extract listing ID from div id
+        const listingId = extractListingIdFromDivId(divId);
+        if (!listingId) return;
+
+        if (seen.has(listingId)) return;
+        seen.add(listingId);
+
+        // Find the detail link
+        const linkEl = card.find('a[href*="/for-sale/details/"]').first();
         const href = linkEl.attr('href');
+        const url = ensureAbsoluteUrl(href) || `${BASE_URL}/for-sale/details/${listingId}/`;
 
-        // Skip if no valid link or if it's a contact link
-        if (!href || href.includes('/contact/')) return;
-
-        const url = ensureAbsoluteUrl(href);
-        const listingId = extractListingId(url);
-        const key = listingId || url;
-
-        if (!key || seen.has(key)) return;
-        seen.add(key);
-
-        // CORRECT SELECTORS from scrapingdog research:
-        // Price: p._64if862
-        const priceText = cleanText(card.find('p._64if862').first().text());
-
-        // Address: address.m6hnz62
-        const address = cleanText(card.find('address.m6hnz62').first().text());
-
-        // Description/Title: p.m6hnz63 or h2.m6hnz61
-        const description = cleanText(card.find('p.m6hnz63').first().text());
-        const title = cleanText(
-            card.find('h2.m6hnz61').first().text() ||
-            card.find('h2').first().text() ||
-            description
-        );
-
-        // Beds and Baths - look for various patterns
-        // Pattern 1: span.num-beds, span.num-baths
-        let beds = parseNumber(card.find('span.num-beds').first().text());
-        let baths = parseNumber(card.find('span.num-baths').first().text());
-
-        // Pattern 2: Look for elements with bed/bath icons or text
-        if (!beds) {
-            // Try finding text that contains "bed"
-            card.find('span, p, div').each((_, el) => {
-                const text = $(el).text().toLowerCase();
-                if (!beds && text.includes('bed') && !text.includes('bath')) {
-                    const match = text.match(/(\d+)\s*bed/i);
-                    if (match) beds = Number(match[1]);
-                }
-                if (!baths && text.includes('bath')) {
-                    const match = text.match(/(\d+)\s*bath/i);
-                    if (match) baths = Number(match[1]);
+        // CORRECT: Price - p[class*="price_priceText"]
+        let priceText = cleanText(card.find('p[class*="price_priceText"]').first().text());
+        if (!priceText) {
+            // Fallback: find any text with £
+            card.find('p').each((_, el) => {
+                const text = $(el).text();
+                if (!priceText && text.includes('£')) {
+                    const match = text.match(/£[\d,]+/);
+                    if (match) priceText = match[0];
                 }
             });
         }
 
-        // Pattern 3: data-testid attributes
-        if (!beds) {
-            beds = parseNumber(card.find('[data-testid="bed"]').first().text());
-        }
-        if (!baths) {
-            baths = parseNumber(card.find('[data-testid="bath"]').first().text());
+        // CORRECT: Address - address[class*="summary_address"]
+        const address = cleanText(
+            card.find('address[class*="summary_address"]').first().text() ||
+            card.find('address').first().text()
+        );
+
+        // CORRECT: Description - p[class*="summary_summary"]
+        const description = cleanText(
+            card.find('p[class*="summary_summary"]').first().text()
+        );
+
+        // CORRECT: Amenities - p[class*="amenities_amenityList"] → "1 bed 1 bath 1 reception"
+        const amenitiesText = cleanText(
+            card.find('p[class*="amenities_amenityList"]').first().text() ||
+            card.find('p[class*="amenities"]').first().text()
+        );
+
+        // Parse beds, baths, receptions from amenities text
+        let beds = null;
+        let baths = null;
+        let receptions = null;
+
+        if (amenitiesText) {
+            const bedsMatch = amenitiesText.match(/(\d+)\s*bed/i);
+            const bathsMatch = amenitiesText.match(/(\d+)\s*bath/i);
+            const receptionsMatch = amenitiesText.match(/(\d+)\s*reception/i);
+
+            if (bedsMatch) beds = Number(bedsMatch[1]);
+            if (bathsMatch) baths = Number(bathsMatch[1]);
+            if (receptionsMatch) receptions = Number(receptionsMatch[1]);
         }
 
-        // Property type from description or dedicated element
-        let propertyType = null;
-        if (title) {
-            const typeMatch = title.match(/\d+\s*bed\s+(\w+)/i);
-            if (typeMatch) {
-                propertyType = cleanText(typeMatch[1]);
+        // Fallback: search entire card text for bed/bath patterns
+        if (!beds || !baths) {
+            const cardText = card.text();
+            if (!beds) {
+                const match = cardText.match(/(\d+)\s*bed/i);
+                if (match) beds = Number(match[1]);
+            }
+            if (!baths) {
+                const match = cardText.match(/(\d+)\s*bath/i);
+                if (match) baths = Number(match[1]);
             }
         }
 
-        // Image
-        const image = ensureAbsoluteUrl(
-            card.find('img').first().attr('src') ||
-            card.find('picture source').first().attr('srcset')?.split(',')[0]?.trim()?.split(' ')[0]
+        // Title from heading or link text
+        const title = cleanText(
+            card.find('h2').first().text() ||
+            card.find('h3').first().text() ||
+            linkEl.text()
         );
+
+        // Property type from amenities or title
+        let propertyType = null;
+        if (amenitiesText) {
+            // Common types: flat, house, apartment, studio, bungalow
+            const typeMatch = amenitiesText.match(/\b(flat|house|apartment|studio|bungalow|maisonette|cottage|penthouse|detached|semi-detached|terraced)\b/i);
+            if (typeMatch) propertyType = cleanText(typeMatch[1]);
+        }
+        if (!propertyType && title) {
+            const typeMatch = title.match(/\b(flat|house|apartment|studio|bungalow|maisonette|cottage|penthouse)\b/i);
+            if (typeMatch) propertyType = cleanText(typeMatch[1]);
+        }
+
+        // Image - first img in the card
+        let image = null;
+        const imgEl = card.find('img').first();
+        const imgSrc = imgEl.attr('src') || imgEl.attr('data-src');
+        if (imgSrc) {
+            // Clean up image URL (remove :p suffix if present)
+            image = ensureAbsoluteUrl(imgSrc.split(':p')[0].split('?')[0]);
+        }
 
         // Agent name
         const agentName = cleanText(
-            card.find('[data-testid="agent-name"]').first().text() ||
-            card.find('.agent-name').first().text()
+            card.find('[class*="agent"]').first().text() ||
+            card.find('[class*="branch"]').first().text()
         );
 
         listings.push({
@@ -233,6 +198,7 @@ const extractListingsFromHtml = (html) => {
             postalCode: extractUkPostcode(address),
             beds,
             baths,
+            receptions,
             propertyType,
             description,
             image,
@@ -242,49 +208,31 @@ const extractListingsFromHtml = (html) => {
         });
     });
 
-    // FALLBACK: If no cards found with div.dkr2t86, try finding links directly
+    // Fallback if no div[id^="listing_"] found
     if (listings.length === 0) {
-        log.debug('No div.dkr2t86 cards found, falling back to link-based extraction');
+        log.warning('No div[id^="listing_"] found, trying fallback with links');
 
-        $('a[href^="/for-sale/details/"]').each((_, el) => {
+        $('a[href*="/for-sale/details/"]').each((_, el) => {
             const href = $(el).attr('href');
             if (!href || href.includes('/contact/')) return;
 
             const url = ensureAbsoluteUrl(href);
             const listingId = extractListingId(url);
-            const key = listingId || url;
 
-            if (!key || seen.has(key)) return;
-            seen.add(key);
-
-            // Try to find parent container
-            let card = $(el);
-            for (let i = 0; i < 8; i++) {
-                card = card.parent();
-                if (!card.length) break;
-            }
-
-            // Extract what we can
-            const priceText = cleanText(
-                card.find('p._64if862').first().text() ||
-                card.find('[data-testid="listing-price"]').first().text()
-            );
-
-            const address = cleanText(
-                card.find('address.m6hnz62').first().text() ||
-                card.find('address').first().text()
-            );
+            if (!listingId || seen.has(listingId)) return;
+            seen.add(listingId);
 
             listings.push({
                 listingId,
                 url,
                 title: null,
-                price: parsePriceValue(priceText),
-                priceText,
-                address,
-                postalCode: extractUkPostcode(address),
+                price: null,
+                priceText: null,
+                address: null,
+                postalCode: null,
                 beds: null,
                 baths: null,
+                receptions: null,
                 propertyType: null,
                 description: null,
                 image: null,
@@ -296,36 +244,6 @@ const extractListingsFromHtml = (html) => {
     }
 
     return listings;
-};
-
-// ============================================================================
-// MERGE LISTINGS FROM BOTH SOURCES
-// ============================================================================
-const mergeListings = (jsonLdListings, htmlListings) => {
-    const merged = new Map();
-
-    for (const listing of jsonLdListings) {
-        const key = listing.listingId || listing.url;
-        if (key) merged.set(key, { ...listing });
-    }
-
-    for (const listing of htmlListings) {
-        const key = listing.listingId || listing.url;
-        if (!key) continue;
-
-        if (merged.has(key)) {
-            const existing = merged.get(key);
-            for (const [field, value] of Object.entries(listing)) {
-                if (existing[field] === null || existing[field] === undefined) {
-                    existing[field] = value;
-                }
-            }
-        } else {
-            merged.set(key, { ...listing });
-        }
-    }
-
-    return Array.from(merged.values());
 };
 
 // ============================================================================
@@ -353,17 +271,13 @@ try {
     const startUrl = input.startUrl || (startUrls ? null : DEFAULT_START_URL);
 
     if (!startUrl && !startUrls) {
-        const message = 'Missing required field: startUrl or startUrls.';
-        log.error(message);
-        await Actor.setStatusMessage(message);
+        log.error('Missing startUrl');
         await Actor.exit({ exitCode: 1 });
     }
 
     const resultsWanted = Math.max(1, Number.isFinite(+input.results_wanted) ? +input.results_wanted : 50);
     const maxPages = Math.max(1, Number.isFinite(+input.max_pages) ? +input.max_pages : 5);
-    const maxConcurrency = 1; // Single concurrency for stealth
 
-    // Proxy configuration
     const proxyConfiguration = await Actor.createProxyConfiguration({
         useApifyProxy: true,
         apifyProxyGroups: ['RESIDENTIAL'],
@@ -371,15 +285,9 @@ try {
         ...input.proxyConfiguration,
     });
 
-    log.info('Zoopla Scraper Starting v2.4.0', {
-        targets: startUrls?.length || 1,
-        resultsWanted,
-        maxPages,
-        maxConcurrency,
-    });
+    log.info('Zoopla Scraper v2.6.0 Starting', { resultsWanted, maxPages });
 
     const seen = new Set();
-    const stats = { pagesProcessed: 0, listingsSaved: 0, methodsUsed: new Set() };
     let saved = 0;
 
     const targets = startUrls || [startUrl];
@@ -394,14 +302,11 @@ try {
         }
     }
 
-    const camoufoxOptions = await camoufoxLaunchOptions({
-        headless: true,
-        geoip: true,
-    });
+    const camoufoxOptions = await camoufoxLaunchOptions({ headless: true, geoip: true });
 
     const crawler = new PlaywrightCrawler({
         proxyConfiguration,
-        maxConcurrency,
+        maxConcurrency: 1,
         maxRequestRetries: 5,
         requestHandlerTimeoutSecs: 120,
         navigationTimeoutSecs: 90,
@@ -418,126 +323,86 @@ try {
         },
 
         preNavigationHooks: [
-            async ({ page }) => {
-                await sleep(2000 + Math.random() * 3000);
-            },
+            async () => { await sleep(2000 + Math.random() * 3000); },
         ],
 
         postNavigationHooks: [
             async ({ page }) => {
                 await page.waitForLoadState('domcontentloaded');
-                await sleep(2000 + Math.random() * 1000);
+                await sleep(2000);
+
+                // Wait for listing cards to appear
+                await page.waitForSelector('div[id^="listing_"]', { timeout: 15000 }).catch(() => {
+                    log.debug('Listing cards not found with selector');
+                });
 
                 // Scroll to load all content
-                await page.evaluate(() => window.scrollBy(0, 500));
-                await sleep(500);
-                await page.evaluate(() => window.scrollBy(0, 800));
-                await sleep(500);
-                await page.evaluate(() => window.scrollBy(0, 500));
+                for (let i = 0; i < 5; i++) {
+                    await page.evaluate(() => window.scrollBy(0, 500));
+                    await sleep(400);
+                }
                 await sleep(1000);
             },
         ],
 
         async requestHandler({ request, page }) {
-            const { type, page: pageNum } = request.userData;
+            const { page: pageNum } = request.userData;
 
             if (saved >= resultsWanted) return;
 
-            // Check for Cloudflare
             const pageContent = await page.content();
+
+            // Check for Cloudflare
             if (pageContent.includes('Just a moment') || pageContent.includes('Verify you are human')) {
-                log.warning(`Cloudflare challenge on page ${pageNum}, waiting...`);
-                await sleep(8000);
+                log.warning(`Cloudflare on page ${pageNum}, waiting...`);
+                await sleep(10000);
                 await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
             }
 
-            if (type === 'search') {
-                log.info(`Processing search page ${pageNum}: ${request.url}`);
+            log.info(`Processing page ${pageNum}: ${request.url}`);
 
-                // Wait for content to render
-                await page.waitForSelector('div.dkr2t86', { timeout: 15000 }).catch(() => {
-                    log.debug('div.dkr2t86 not found, trying alternatives');
+            const html = await page.content();
+            const listings = extractListingsFromHtml(html);
+
+            log.info(`Page ${pageNum}: Found ${listings.length} listings`);
+
+            if (!listings.length) {
+                log.warning(`No listings on page ${pageNum}`);
+                const title = await page.title();
+                log.debug(`Page title: ${title}`);
+                return;
+            }
+
+            for (const listing of listings) {
+                if (saved >= resultsWanted) break;
+
+                const key = listing.listingId || listing.url;
+                if (!key || seen.has(key)) continue;
+                seen.add(key);
+
+                await Dataset.pushData({
+                    ...listing,
+                    priceValue: parsePriceValue(listing.price) || null,
+                    scrapedAt: new Date().toISOString(),
                 });
 
-                const html = await page.content();
-
-                // Extract using both methods
-                const jsonLdListings = extractListingsFromJsonLd(html);
-                const htmlListings = extractListingsFromHtml(html);
-                const listings = mergeListings(jsonLdListings, htmlListings);
-
-                if (jsonLdListings.length > 0) stats.methodsUsed.add('json-ld');
-                if (htmlListings.length > 0) stats.methodsUsed.add('html');
-
-                log.info(`Found ${listings.length} listings on page ${pageNum} (JSON-LD: ${jsonLdListings.length}, HTML: ${htmlListings.length})`);
-
-                if (!listings.length) {
-                    log.warning(`No listings on page ${pageNum}`);
-                    // Debug: Save page content for analysis
-                    const title = await page.title();
-                    log.debug(`Page title: ${title}`);
-                    return;
-                }
-
-                stats.pagesProcessed++;
-
-                for (const listing of listings) {
-                    if (saved >= resultsWanted) break;
-
-                    const key = listing.listingId || listing.url;
-                    if (!key || seen.has(key)) continue;
-                    seen.add(key);
-
-                    const property = {
-                        listingId: listing.listingId || null,
-                        url: listing.url,
-                        title: listing.title || null,
-                        price: listing.price || null,
-                        priceValue: parsePriceValue(listing.price) || null,
-                        priceCurrency: listing.priceCurrency || 'GBP',
-                        priceText: listing.priceText || (listing.price ? `£${listing.price.toLocaleString()}` : null),
-                        address: listing.address || null,
-                        postalCode: listing.postalCode || extractUkPostcode(listing.address),
-                        locality: listing.locality || null,
-                        beds: listing.beds || null,
-                        baths: listing.baths || null,
-                        propertyType: listing.propertyType || null,
-                        description: listing.description || null,
-                        image: listing.image || null,
-                        agentName: listing.agentName || null,
-                        source: listing.source,
-                        scrapedAt: new Date().toISOString(),
-                    };
-
-                    await Dataset.pushData(property);
-                    saved++;
-                    stats.listingsSaved = saved;
-
-                    if (saved % 10 === 0) {
-                        log.info(`Progress: ${saved}/${resultsWanted} listings saved`);
-                    }
-                }
+                saved++;
+                if (saved % 10 === 0) log.info(`Progress: ${saved}/${resultsWanted}`);
             }
         },
 
         async failedRequestHandler({ request, error }) {
-            log.error(`Failed: ${request.url}`, { error: error.message });
+            log.error(`Failed: ${request.url} - ${error.message}`);
         },
     });
 
     await crawler.run(initialRequests);
 
-    if (saved === 0) {
-        await Actor.setStatusMessage('No listings scraped. Check logs.');
-    } else {
-        log.info('Complete!', { saved, pages: stats.pagesProcessed, methods: Array.from(stats.methodsUsed) });
-        await Actor.setStatusMessage(`Scraped ${saved} listings`);
-        await Actor.setValue('RUN_SUMMARY', { saved, pages: stats.pagesProcessed });
-    }
+    log.info(`Complete! Saved ${saved} listings`);
+    await Actor.setStatusMessage(`Scraped ${saved} listings`);
 
 } catch (error) {
-    log.error(`Error: ${error.message}`, { stack: error.stack });
-    await Actor.setStatusMessage(`Error: ${error.message}`);
+    log.error(error.message);
     throw error;
 } finally {
     await Actor.exit();
