@@ -20,31 +20,11 @@
     "results_wanted": {
       "title": "Maximum listings",
       "type": "integer",
-      "description": "Maximum number of property listings to collect (1-500).",
+      "description": "Maximum number of property listings to collect. Pages are automatically calculated (28 listings per page).",
       "minimum": 1,
-      "maximum": 500,
+      "maximum": 1000,
       "default": 50,
       "prefill": 50,
-      "editor": "number"
-    },
-    "max_pages": {
-      "title": "Maximum pages",
-      "type": "integer",
-      "description": "Maximum number of search pages to process per URL.",
-      "minimum": 1,
-      "maximum": 20,
-      "editor": "number",
-      "default": 5,
-      "prefill": 5
-    },
-    "maxConcurrency": {
-      "title": "Max concurrency",
-      "type": "integer",
-      "description": "Maximum number of concurrent browser pages. Lower values are more stealthy.",
-      "minimum": 1,
-      "maximum": 5,
-      "default": 2,
-      "prefill": 2,
       "editor": "number"
     },
     "proxyConfiguration": {

@@ -1,19 +1,18 @@
 /**
- * Zoopla Property Scraper - Production Ready v2.8.0
+ * Zoopla Property Scraper - Production Ready v3.0.0
  * 
- * CORRECT SELECTORS (from live browser inspection):
+ * OPTIMIZED FOR SPEED & COST:
+ * - Reduced delays (1-2s instead of 2-5s)
+ * - Block unnecessary resources (images, CSS, fonts)
+ * - Faster scrolling
+ * - Minimal waits
+ * 
+ * SELECTORS:
  * - Listing container: div[id^="listing_"]
  * - Price: p[class*="price_priceText"]
  * - Address: address[class*="summary_address"]
  * - Description: p[class*="summary_summary"]
- * - Amenities: p[class*="amenities_amenityList"] → "1 bed 1 bath 1 reception"
- * - Image: div[class*="layoutMediaWrapper"] img
- * - Agent: img[alt*="Estate Agents"] (alt attribute)
- * 
- * FIXES in v2.8.0:
- * - Removed queue.drop() which caused errors - use simple flag instead
- * - Improved postal code extraction with multiple patterns
- * - Better baths extraction with fallback to generic patterns
+ * - Amenities: p[class*="amenities_amenityList"]
  */
 
 import { PlaywrightCrawler } from '@crawlee/playwright';
@@ -27,9 +26,25 @@ import { load as cheerioLoad } from 'cheerio';
 // ============================================================================
 const BASE_URL = 'https://www.zoopla.co.uk';
 const DEFAULT_START_URL = 'https://www.zoopla.co.uk/for-sale/property/london/?q=London&search_source=home&recent_search=true';
+const LISTINGS_PER_PAGE = 28;
+const MAX_CONCURRENCY = 1;
 
-// Property types to search for
 const PROPERTY_TYPES = ['flat', 'apartment', 'house', 'maisonette', 'bungalow', 'studio', 'duplex', 'penthouse', 'townhouse', 'land', 'detached', 'semi-detached', 'terraced', 'cottage'];
+
+// Resources to block for speed
+const BLOCKED_RESOURCES = ['image', 'media', 'font', 'stylesheet'];
+const BLOCKED_URLS = [
+    'google-analytics.com',
+    'googletagmanager.com',
+    'facebook.com',
+    'doubleclick.net',
+    'hotjar.com',
+    'newrelic.com',
+    'optimizely.com',
+    'segment.com',
+    'amplitude.com',
+    'mixpanel.com',
+];
 
 // ============================================================================
 // UTILITY FUNCTIONS
@@ -58,40 +73,26 @@ const parsePriceValue = (value) => {
     return numeric ? Number(numeric) : null;
 };
 
-// Improved postal code extraction
 const extractUkPostcode = (value) => {
     if (!value) return null;
     const text = String(value);
-
-    // UK postcode patterns (with and without space)
     const patterns = [
-        // Standard format: SW1A 1AA, EC1A 1BB
         /\b([A-Z]{1,2}\d{1,2}[A-Z]?\s+\d[A-Z]{2})\b/i,
-        // Without space: SW1A1AA
         /\b([A-Z]{1,2}\d{1,2}[A-Z]?\d[A-Z]{2})\b/i,
-        // Just outcode at end: SW1, E1, W1A
         /\b([A-Z]{1,2}\d{1,2}[A-Z]?)\s*$/i,
     ];
-
     for (const pattern of patterns) {
         const match = text.match(pattern);
-        if (match) {
-            return match[1].toUpperCase();
-        }
+        if (match) return match[1].toUpperCase();
     }
-
-    // Try extracting from the last part of address after comma
     const parts = text.split(',');
     if (parts.length > 1) {
         const lastPart = parts[parts.length - 1].trim();
         for (const pattern of patterns) {
             const match = lastPart.match(pattern);
-            if (match) {
-                return match[1].toUpperCase();
-            }
+            if (match) return match[1].toUpperCase();
         }
     }
-
     return null;
 };
 
@@ -107,7 +108,7 @@ const extractPropertyType = (text) => {
 };
 
 // ============================================================================
-// HTML EXTRACTION
+// HTML EXTRACTION (Optimized - minimal operations)
 // ============================================================================
 const extractListingsFromHtml = (html) => {
     const $ = cheerioLoad(html);
@@ -115,7 +116,6 @@ const extractListingsFromHtml = (html) => {
     const seen = new Set();
 
     const cards = $('div[id^="listing_"]');
-    log.info(`Found ${cards.length} listing cards with div[id^="listing_"]`);
 
     cards.each((_, cardEl) => {
         const card = $(cardEl);
@@ -125,7 +125,6 @@ const extractListingsFromHtml = (html) => {
         if (!listingId || seen.has(listingId)) return;
         seen.add(listingId);
 
-        // Link
         const linkEl = card.find('a[href*="/for-sale/details/"]').first();
         const href = linkEl.attr('href');
         const url = ensureAbsoluteUrl(href) || `${BASE_URL}/for-sale/details/${listingId}/`;
@@ -148,61 +147,28 @@ const extractListingsFromHtml = (html) => {
             card.find('address').first().text()
         );
 
-        // Postal code - improved extraction
-        const postalCode = extractUkPostcode(address);
-
         // Description
         const description = cleanText(
             card.find('p[class*="summary_summary"]').first().text()
         );
 
-        // Amenities - try multiple selectors
+        // Amenities
         let amenitiesText = cleanText(
-            card.find('p[class*="amenities_amenityList"]').first().text()
+            card.find('p[class*="amenities_amenityList"]').first().text() ||
+            card.find('p[class*="amenities"]').first().text()
         );
-        if (!amenitiesText) {
-            amenitiesText = cleanText(card.find('p[class*="amenities"]').first().text());
-        }
-        if (!amenitiesText) {
-            // Try finding any element with bed/bath info
-            card.find('p, span, div').each((_, el) => {
-                const text = $(el).text();
-                if (!amenitiesText && text.match(/\d+\s*bed/i)) {
-                    amenitiesText = cleanText(text);
-                }
-            });
-        }
 
-        // Parse beds, baths, receptions
-        let beds = null;
-        let baths = null;
-        let receptions = null;
-
-        // First try from amenities text
-        if (amenitiesText) {
-            const bedsMatch = amenitiesText.match(/(\d+)\s*bed/i);
-            const bathsMatch = amenitiesText.match(/(\d+)\s*bath/i);
-            const receptionsMatch = amenitiesText.match(/(\d+)\s*reception/i);
-
-            if (bedsMatch) beds = Number(bedsMatch[1]);
-            if (bathsMatch) baths = Number(bathsMatch[1]);
-            if (receptionsMatch) receptions = Number(receptionsMatch[1]);
-        }
-
-        // Fallback: search entire card text
+        // Parse beds, baths
+        let beds = null, baths = null, receptions = null;
         const cardText = card.text();
-        if (!beds) {
-            const match = cardText.match(/(\d+)\s*bed(?:room)?s?/i);
-            if (match) beds = Number(match[1]);
-        }
-        if (!baths) {
-            const match = cardText.match(/(\d+)\s*bath(?:room)?s?/i);
-            if (match) baths = Number(match[1]);
-        }
-        if (!receptions) {
-            const match = cardText.match(/(\d+)\s*reception/i);
-            if (match) receptions = Number(match[1]);
-        }
+
+        const bedsMatch = cardText.match(/(\d+)\s*bed/i);
+        const bathsMatch = cardText.match(/(\d+)\s*bath/i);
+        const receptionsMatch = cardText.match(/(\d+)\s*reception/i);
+
+        if (bedsMatch) beds = Number(bedsMatch[1]);
+        if (bathsMatch) baths = Number(bathsMatch[1]);
+        if (receptionsMatch) receptions = Number(receptionsMatch[1]);
 
         // Property type
         const propertyType = extractPropertyType(description) ||
@@ -216,21 +182,15 @@ const extractListingsFromHtml = (html) => {
         } else if (beds) {
             title = `${beds} bedroom property for sale`;
         } else {
-            title = cleanText(card.find('h2, h3').first().text()) || address;
+            title = address;
         }
 
-        // Image
+        // Image URL (from srcset or src)
         let image = null;
-        const imgEl = card.find('div[class*="layoutMediaWrapper"] img').first();
-        if (imgEl.length) {
-            image = imgEl.attr('src') || imgEl.attr('data-src');
-        }
-        if (!image) {
-            const firstImg = card.find('img').first();
-            image = firstImg.attr('src') || firstImg.attr('data-src');
-        }
-        if (image) {
-            image = ensureAbsoluteUrl(image.split('?')[0]);
+        const imgEl = card.find('img').first();
+        const imgSrc = imgEl.attr('src') || imgEl.attr('data-src');
+        if (imgSrc) {
+            image = ensureAbsoluteUrl(imgSrc.split('?')[0]);
         }
 
         // Agent name
@@ -238,10 +198,6 @@ const extractListingsFromHtml = (html) => {
         const agentImg = card.find('img[alt*="Estate Agent"], img[alt*="logo"]').first();
         if (agentImg.length) {
             agentName = cleanText(agentImg.attr('alt')?.replace(/\s*logo\s*/gi, '').replace(/Estate Agents?/gi, '').trim());
-        }
-        if (!agentName) {
-            const agentEl = card.find('[class*="agent"], [class*="branch"]').first();
-            agentName = cleanText(agentEl.text());
         }
 
         listings.push({
@@ -251,7 +207,7 @@ const extractListingsFromHtml = (html) => {
             price: parsePriceValue(priceText),
             priceText,
             address,
-            postalCode,
+            postalCode: extractUkPostcode(address),
             beds,
             baths,
             receptions,
@@ -260,7 +216,6 @@ const extractListingsFromHtml = (html) => {
             image,
             agentName,
             priceCurrency: 'GBP',
-            source: 'html',
         });
     });
 
@@ -297,7 +252,7 @@ try {
     }
 
     const resultsWanted = Math.max(1, Number.isFinite(+input.results_wanted) ? +input.results_wanted : 50);
-    const maxPages = Math.max(1, Number.isFinite(+input.max_pages) ? +input.max_pages : 5);
+    const maxPages = Math.ceil(resultsWanted / LISTINGS_PER_PAGE);
 
     const proxyConfiguration = await Actor.createProxyConfiguration({
         useApifyProxy: true,
@@ -306,7 +261,11 @@ try {
         ...input.proxyConfiguration,
     });
 
-    log.info('Zoopla Scraper v2.8.0 Starting', { resultsWanted, maxPages });
+    log.info('Zoopla Scraper v3.0.0 (Optimized)', {
+        resultsWanted,
+        maxPages,
+        mode: 'FAST',
+    });
 
     const seen = new Set();
     let saved = 0;
@@ -318,7 +277,7 @@ try {
         for (let page = 1; page <= maxPages; page++) {
             initialRequests.push({
                 url: buildSearchUrlForPage(target, page),
-                userData: { type: 'search', page },
+                userData: { page },
             });
         }
     }
@@ -327,10 +286,10 @@ try {
 
     const crawler = new PlaywrightCrawler({
         proxyConfiguration,
-        maxConcurrency: 1,
+        maxConcurrency: MAX_CONCURRENCY,
         maxRequestRetries: 3,
-        requestHandlerTimeoutSecs: 120,
-        navigationTimeoutSecs: 90,
+        requestHandlerTimeoutSecs: 60,
+        navigationTimeoutSecs: 45,
 
         launchContext: {
             launcher: firefox,
@@ -340,75 +299,100 @@ try {
         browserPoolOptions: {
             useFingerprints: false,
             maxOpenPagesPerBrowser: 1,
-            retireBrowserAfterPageCount: 2,
+            retireBrowserAfterPageCount: 3,
         },
 
+        // Block unnecessary resources for speed
         preNavigationHooks: [
-            async () => { await sleep(2000 + Math.random() * 3000); },
+            async ({ page }) => {
+                // FAST: Minimal delay (just enough to not trigger rate limits)
+                await sleep(1000 + Math.random() * 1000);
+
+                // Block resources for speed
+                await page.route('**/*', (route) => {
+                    const request = route.request();
+                    const resourceType = request.resourceType();
+                    const url = request.url();
+
+                    // Block heavy resources
+                    if (BLOCKED_RESOURCES.includes(resourceType)) {
+                        return route.abort();
+                    }
+
+                    // Block tracking/analytics
+                    if (BLOCKED_URLS.some(blocked => url.includes(blocked))) {
+                        return route.abort();
+                    }
+
+                    return route.continue();
+                });
+            },
         ],
 
         postNavigationHooks: [
             async ({ page }) => {
+                // FAST: Minimal wait for DOM
                 await page.waitForLoadState('domcontentloaded');
-                await sleep(2000);
-                await page.waitForSelector('div[id^="listing_"]', { timeout: 15000 }).catch(() => { });
-                for (let i = 0; i < 5; i++) {
-                    await page.evaluate(() => window.scrollBy(0, 500));
-                    await sleep(400);
-                }
-                await sleep(1000);
+
+                // Quick scroll to trigger lazy loading
+                await page.evaluate(() => {
+                    window.scrollTo(0, 1000);
+                    window.scrollTo(0, 2000);
+                    window.scrollTo(0, 0);
+                });
+
+                // Short wait for content
+                await sleep(500);
             },
         ],
 
         async requestHandler({ request, page }) {
             const { page: pageNum } = request.userData;
 
-            // SIMPLE SKIP: Just return early if we have enough
             if (saved >= resultsWanted) {
-                log.info(`Skipping page ${pageNum} - already have ${saved}/${resultsWanted} listings`);
+                log.debug(`Skipping page ${pageNum}`);
                 return;
             }
 
             const pageContent = await page.content();
 
+            // Cloudflare check
             if (pageContent.includes('Just a moment') || pageContent.includes('Verify you are human')) {
                 log.warning(`Cloudflare on page ${pageNum}, waiting...`);
-                await sleep(10000);
-                await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
+                await sleep(5000);
+                await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => { });
             }
 
-            log.info(`Processing page ${pageNum}: ${request.url}`);
+            log.info(`Page ${pageNum}/${maxPages}`);
 
             const html = await page.content();
             const listings = extractListingsFromHtml(html);
 
-            log.info(`Page ${pageNum}: Found ${listings.length} listings`);
+            log.info(`Found ${listings.length} listings`);
 
-            if (!listings.length) {
-                log.warning(`No listings on page ${pageNum}`);
-                return;
-            }
+            if (!listings.length) return;
 
+            // Batch push for speed
+            const toSave = [];
             for (const listing of listings) {
                 if (saved >= resultsWanted) break;
 
-                const key = listing.listingId || listing.url;
+                const key = listing.listingId;
                 if (!key || seen.has(key)) continue;
                 seen.add(key);
 
-                await Dataset.pushData({
+                toSave.push({
                     ...listing,
                     priceValue: parsePriceValue(listing.price) || null,
                     scrapedAt: new Date().toISOString(),
                 });
-
                 saved++;
-                if (saved % 10 === 0) log.info(`Progress: ${saved}/${resultsWanted}`);
             }
 
-            // Log when target reached (but don't try to drop queue)
-            if (saved >= resultsWanted) {
-                log.info(`Reached ${saved}/${resultsWanted} listings. Remaining pages will be skipped.`);
+            // Push all at once (faster than one by one)
+            if (toSave.length) {
+                await Dataset.pushData(toSave);
+                log.info(`Saved ${saved}/${resultsWanted}`);
             }
         },
 
@@ -419,7 +403,7 @@ try {
 
     await crawler.run(initialRequests);
 
-    log.info(`Complete! Saved ${saved} listings`);
+    log.info(`Done! ${saved} listings`);
     await Actor.setStatusMessage(`Scraped ${saved} listings`);
 
 } catch (error) {
