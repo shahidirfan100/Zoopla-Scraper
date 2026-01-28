@@ -211,7 +211,7 @@ try {
         await Actor.exit({ exitCode: 1 });
     }
 
-    const resultsWanted = Math.max(1, Number.isFinite(+input.results_wanted) ? +input.results_wanted : 50);
+    const resultsWanted = Math.max(1, Number.isFinite(+input.results_wanted) ? +input.results_wanted : 20);
     const maxPages = Math.ceil(resultsWanted / LISTINGS_PER_PAGE);
 
     const proxyConfiguration = await Actor.createProxyConfiguration({
@@ -243,9 +243,9 @@ try {
     const crawler = new PlaywrightCrawler({
         proxyConfiguration,
         maxConcurrency: MAX_CONCURRENCY,
-        maxRequestRetries: 3,
-        requestHandlerTimeoutSecs: 120,
-        navigationTimeoutSecs: 90,
+        maxRequestRetries: 2,
+        requestHandlerTimeoutSecs: 60,
+        navigationTimeoutSecs: 30,
 
         launchContext: {
             launcher: firefox,
@@ -261,25 +261,25 @@ try {
         // NO page.route() blocking - it triggers detection!
         preNavigationHooks: [
             async () => {
-                // Moderate delay for stealth
-                await sleep(2000 + Math.random() * 2000);
+                // Moderate delay for stealth (reduced for QA speed)
+                await sleep(1000 + Math.random() * 1000);
             },
         ],
 
         postNavigationHooks: [
             async ({ page }) => {
                 await page.waitForLoadState('domcontentloaded');
-                await sleep(1500);
+                await sleep(800);
 
                 // Wait for listings
-                await page.waitForSelector('div[id^="listing_"]', { timeout: 15000 }).catch(() => { });
+                await page.waitForSelector('div[id^="listing_"]', { timeout: 10000 }).catch(() => { });
 
-                // Scroll to load content
-                for (let i = 0; i < 4; i++) {
+                // Scroll to load content (reduced for speed)
+                for (let i = 0; i < 3; i++) {
                     await page.evaluate(() => window.scrollBy(0, 500));
-                    await sleep(300);
+                    await sleep(200);
                 }
-                await sleep(500);
+                await sleep(300);
             },
         ],
 
@@ -295,8 +295,8 @@ try {
 
             if (pageContent.includes('Just a moment') || pageContent.includes('Verify you are human')) {
                 log.warning(`Cloudflare on page ${pageNum}, waiting...`);
-                await sleep(8000);
-                await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => { });
+                await sleep(5000);
+                await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => { });
             }
 
             log.info(`Page ${pageNum}/${maxPages}`);
